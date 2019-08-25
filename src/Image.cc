@@ -281,18 +281,6 @@ void Image::SetOnerror(const Napi::CallbackInfo& info, const Napi::Value& value)
   }
 }
 
-/*
- * Initialize a new Image.
- */
-
-Image::Image() {
-  filename = NULL;
-  _data = NULL;
-  _data_len = 0;
-  _surface = NULL;
-  width = height = 0;
-  state = DEFAULT;
-}
 
 /*
  * Destroy image and associated surface.
