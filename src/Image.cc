@@ -66,6 +66,20 @@ Image::Initialize(Napi::Env& env, Napi::Object& target) {
 Image::Image(const Napi::CallbackInfo& info) : Image() {
   this->data_mode = DATA_IMAGE;
 }
+// // DIFFERENT CODE (replacing 3 lines above) FROM digitalinfinity fork and commit: https://github.com/digitalinfinity/node-canvas/commit/e93ddb2fafc62da0f447e83410000a8119e1296c
+
+// Image::Image(const Napi::CallbackInfo& info) :
+//   Napi::ObjectWrap<Image>(info),
+//   filename(NULL),
+//   _data(NULL),
+//   _data_len(0),
+//   _surface(NULL),
+//   width(0),
+//   height(0),
+//   state(DEFAULT),
+//   data_mode(DATA_IMAGE)
+// {
+// }
 
 /*
  * Get complete boolean.

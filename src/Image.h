@@ -77,7 +77,8 @@ class Image : public Napi::ObjectWrap<Image> {
     void error(Napi::Error error);
     void loaded(Napi::Env env);
     cairo_status_t load();
-    Image();
+    // digitalinfinity fork removed this line (and I agree it should be): https://github.com/digitalinfinity/node-canvas/commit/e93ddb2fafc62da0f447e83410000a8119e1296c
+    // Image();
 
     enum {
         DEFAULT
