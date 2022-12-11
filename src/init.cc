@@ -23,7 +23,8 @@
 #endif
 
 // Napi::Object init(Napi::Env env, Napi::Object exports) { // digitalinfinity fork had this instead: https://github.com/digitalinfinity/node-canvas/commit/e93ddb2fafc62da0f447e83410000a8119e1296c
-Napi::Object InitAll(Napi::Env env, Napi::Object exports) {
+// Napi::Object InitAll(Napi::Env env, Napi::Object exports) {
+Napi::Object init(Napi::Env env, Napi::Object exports) {
   Canvas::Initialize(env, exports);
   Image::Initialize(env, exports);
   ImageData::Initialize(env, exports);
@@ -77,4 +78,5 @@ Napi::Object InitAll(Napi::Env env, Napi::Object exports) {
 }
 
 // NODE_API_MODULE(canvas, init); // digitalinfinity fork had this instead: https://github.com/digitalinfinity/node-canvas/commit/e93ddb2fafc62da0f447e83410000a8119e1296c
-NODE_API_MODULE(canvas, InitAll);
+// NODE_API_MODULE(canvas, InitAll);
+NODE_API_MODULE(canvas, init);
