@@ -29,10 +29,10 @@
     "test-server": "node test/server.js"
   },
   "dependencies": {
-    "express": "latest",
-    "mocha": "latest",
-    "node-addon-api": "latest",
-    "standard": "latest"
+    "express": ">=4.18.2",
+    "mocha": ">=3.1.2",
+    "node-addon-api": ">=1.0.0",
+    "standard": ">=8.5.0"
   },
   "devDependencies": {},
   "engines": {
