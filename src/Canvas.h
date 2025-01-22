@@ -1,44 +1,17 @@
-
-//
-// Canvas.h
-//
 // Copyright (c) 2010 LearnBoost <tj@learnboost.com>
-//
 
-#ifndef __NODE_CANVAS_H__
-#define __NODE_CANVAS_H__
+#pragma once
 
-#include <node.h>
-#include <v8.h>
-#include <node_object_wrap.h>
-#include <node_version.h>
+struct Closure;
+
+#include "backend/Backend.h"
+#include "closure.h"
+#include <cairo.h>
+#include "dll_visibility.h"
+#include <napi.h>
 #include <pango/pangocairo.h>
 #include <vector>
-#include <cairo.h>
-#include <nan.h>
-
-
-using namespace node;
-using namespace v8;
-
-/*
- * Maxmimum states per context.
- * TODO: remove/resize
- */
-
-#ifndef CANVAS_MAX_STATES
-#define CANVAS_MAX_STATES 64
-#endif
-
-/*
- * Canvas types.
- */
-
-typedef enum {
-  CANVAS_TYPE_IMAGE,
-  CANVAS_TYPE_PDF,
-  CANVAS_TYPE_SVG
-} canvas_type_t;
+#include <cstddef>
 
 /*
  * FontFace describes a font file in terms of one PangoFontDescription that
@@ -46,66 +19,83 @@ typedef enum {
  */
 class FontFace {
   public:
-    PangoFontDescription *sys_desc = NULL;
-    PangoFontDescription *user_desc = NULL;
+    PangoFontDescription *sys_desc = nullptr;
+    PangoFontDescription *user_desc = nullptr;
+    unsigned char file_path[1024];
+};
+
+enum text_baseline_t : uint8_t {
+  TEXT_BASELINE_ALPHABETIC = 0,
+  TEXT_BASELINE_TOP = 1,
+  TEXT_BASELINE_BOTTOM = 2,
+  TEXT_BASELINE_MIDDLE = 3,
+  TEXT_BASELINE_IDEOGRAPHIC = 4,
+  TEXT_BASELINE_HANGING = 5
+};
+
+enum text_align_t : int8_t {
+  TEXT_ALIGNMENT_LEFT = -1,
+  TEXT_ALIGNMENT_CENTER = 0,
+  TEXT_ALIGNMENT_RIGHT = 1,
+  TEXT_ALIGNMENT_START = -2,
+  TEXT_ALIGNMENT_END = 2
+};
+
+enum canvas_draw_mode_t : uint8_t {
+  TEXT_DRAW_PATHS,
+  TEXT_DRAW_GLYPHS
 };
 
 /*
  * Canvas.
  */
 
-class Canvas: public Nan::ObjectWrap {
+class Canvas : public Napi::ObjectWrap<Canvas> {
   public:
-    int width;
-    int height;
-    canvas_type_t type;
-    static Nan::Persistent<FunctionTemplate> constructor;
-    static void Initialize(Nan::ADDON_REGISTER_FUNCTION_ARGS_TYPE target);
-    static NAN_METHOD(New);
-    static NAN_METHOD(ToBuffer);
-    static NAN_GETTER(GetType);
-    static NAN_GETTER(GetStride);
-    static NAN_GETTER(GetWidth);
-    static NAN_GETTER(GetHeight);
-    static NAN_SETTER(SetWidth);
-    static NAN_SETTER(SetHeight);
-    static NAN_METHOD(StreamPNGSync);
-    static NAN_METHOD(StreamPDFSync);
-    static NAN_METHOD(StreamJPEGSync);
-    static NAN_METHOD(RegisterFont);
-    static Local<Value> Error(cairo_status_t status);
-#if NODE_VERSION_AT_LEAST(0, 6, 0)
-    static void ToBufferAsync(uv_work_t *req);
-    static void ToBufferAsyncAfter(uv_work_t *req);
-#else
-    static
-#if NODE_VERSION_AT_LEAST(0, 5, 4)
-      void
-#else
-      int
-#endif
-      EIO_ToBuffer(eio_req *req);
-    static int EIO_AfterToBuffer(eio_req *req);
-#endif
+    Canvas(const Napi::CallbackInfo& info);
+    static void Initialize(Napi::Env& env, Napi::Object& target);
+
+    Napi::Value ToBuffer(const Napi::CallbackInfo& info);
+    Napi::Value GetType(const Napi::CallbackInfo& info);
+    Napi::Value GetStride(const Napi::CallbackInfo& info);
+    Napi::Value GetWidth(const Napi::CallbackInfo& info);
+    Napi::Value GetHeight(const Napi::CallbackInfo& info);
+    void SetWidth(const Napi::CallbackInfo& info, const Napi::Value& value);
+    void SetHeight(const Napi::CallbackInfo& info, const Napi::Value& value);
+    void StreamPNGSync(const Napi::CallbackInfo& info);
+    void StreamPDFSync(const Napi::CallbackInfo& info);
+    void StreamJPEGSync(const Napi::CallbackInfo& info);
+    static void RegisterFont(const Napi::CallbackInfo& info);
+    static void DeregisterAllFonts(const Napi::CallbackInfo& info);
+    static Napi::Value ParseFont(const Napi::CallbackInfo& info);
+    Napi::Error CairoError(cairo_status_t status);
+    static void ToPngBufferAsync(Closure* closure);
+    static void ToJpegBufferAsync(Closure* closure);
     static PangoWeight GetWeightFromCSSString(const char *weight);
     static PangoStyle GetStyleFromCSSString(const char *style);
     static PangoFontDescription *ResolveFontDescription(const PangoFontDescription *desc);
 
-    inline bool isPDF(){ return CANVAS_TYPE_PDF == type; }
-    inline bool isSVG(){ return CANVAS_TYPE_SVG == type; }
-    inline cairo_surface_t *surface(){ return _surface; }
-    inline void *closure(){ return _closure; }
-    inline uint8_t *data(){ return cairo_image_surface_get_data(_surface); }
-    inline int stride(){ return cairo_image_surface_get_stride(_surface); }
-    inline int nBytes(){ return height * stride(); }
-    Canvas(int width, int height, canvas_type_t type);
-    void resurface(Local<Object> canvas);
+    DLL_PUBLIC inline Backend* backend() { return _backend; }
+    DLL_PUBLIC inline cairo_surface_t* surface(){ return backend()->getSurface(); }
+    cairo_t* createCairoContext();
+
+    DLL_PUBLIC inline uint8_t *data(){ return cairo_image_surface_get_data(surface()); }
+    DLL_PUBLIC inline int stride(){ return cairo_image_surface_get_stride(surface()); }
+    DLL_PUBLIC inline std::size_t nBytes(){
+      return static_cast<std::size_t>(backend()->getHeight()) * stride();
+    }
+
+    DLL_PUBLIC inline int getWidth() { return backend()->getWidth(); }
+    DLL_PUBLIC inline int getHeight() { return backend()->getHeight(); }
+
+    void resurface(Napi::Object This);
+
+    Napi::Env env;
+    static int fontSerial;
 
   private:
-    ~Canvas();
-    cairo_surface_t *_surface;
-    void *_closure;
-    static std::vector<FontFace> _font_face_list;
+    Backend* _backend;
+    Napi::ObjectReference _jsBackend;
+    Napi::FunctionReference ctor;
+    static std::vector<FontFace> font_face_list;
 };
-
-#endif

@@ -1,3 +1,5 @@
+#include "register_font.h"
+
 #include <pango/pangocairo.h>
 #include <pango/pango-fontmap.h>
 #include <pango/pango.h>
@@ -6,6 +8,7 @@
 #include <CoreText/CoreText.h>
 #elif defined(_WIN32)
 #include <windows.h>
+#include <memory>
 #else
 #include <fontconfig/fontconfig.h>
 #endif
@@ -92,35 +95,12 @@ to_utf8(FT_Byte* buf, FT_UInt len, FT_UShort pid, FT_UShort eid) {
  * system, fall back to the other
  */
 
-typedef struct _NameDef {
-  const char *buf;
-  int rank; // the higher the more desirable
-} NameDef;
-
-gint
-_name_def_compare(gconstpointer a, gconstpointer b) {
-  return ((NameDef*)a)->rank > ((NameDef*)b)->rank ? -1 : 1;
-}
-
-// Some versions of GTK+ do not have this, particualrly the one we
-// currently link to in node-canvas's wiki
-void
-_free_g_list_item(gpointer data, gpointer user_data) {
-  NameDef *d = (NameDef *)data;
-  free((void *)(d->buf));
-}
-
-void
-_g_list_free_full(GList *list) {
-  g_list_foreach(list, _free_g_list_item, NULL);
-  g_list_free(list);
-}
-
 char *
 get_family_name(FT_Face face) {
   FT_SfntName name;
-  GList *list = NULL;
-  char *utf8name = NULL;
+
+  int best_rank = -1;
+  char* best_buf = NULL;
 
   for (unsigned i = 0; i < FT_Get_Sfnt_Name_Count(face); ++i) {
     FT_Get_Sfnt_Name(face, i, &name);
@@ -129,20 +109,19 @@ get_family_name(FT_Face face) {
       char *buf = to_utf8(name.string, name.string_len, name.platform_id, name.encoding_id);
 
       if (buf) {
-        NameDef *d = (NameDef*)malloc(sizeof(NameDef));
-        d->buf = (const char*)buf;
-        d->rank = GET_NAME_RANK(name);
-
-        list = g_list_insert_sorted(list, (gpointer)d, _name_def_compare);
+        int rank = GET_NAME_RANK(name);
+        if (rank > best_rank) {
+          best_rank = rank;
+          if (best_buf) free(best_buf);
+          best_buf = buf;
+        } else {
+          free(buf);
+        }
       }
     }
   }
 
-  GList *best_def = g_list_first(list);
-  if (best_def) utf8name = (char*) strdup(((NameDef*)best_def->data)->buf);
-  if (list) _g_list_free_full(list);
-
-  return utf8name;
+  return best_buf;
 }
 
 PangoWeight
@@ -191,6 +170,41 @@ get_pango_style(FT_Long flags) {
   }
 }
 
+#ifdef _WIN32
+std::unique_ptr<wchar_t[]>
+u8ToWide(const char* str) {
+  int iBufferSize = MultiByteToWideChar(CP_UTF8, 0, str, -1, (wchar_t*)NULL, 0);
+  if(!iBufferSize){
+    return nullptr;
+  }
+  std::unique_ptr<wchar_t[]> wpBufWString = std::unique_ptr<wchar_t[]>{ new wchar_t[static_cast<size_t>(iBufferSize)] };
+  if(!MultiByteToWideChar(CP_UTF8, 0, str, -1, wpBufWString.get(), iBufferSize)){
+    return nullptr;
+  }
+  return wpBufWString;
+}
+
+static unsigned long 
+stream_read_func(FT_Stream stream, unsigned long offset, unsigned char* buffer, unsigned long count){
+  HANDLE hFile = reinterpret_cast<HANDLE>(stream->descriptor.pointer);
+  DWORD numberOfBytesRead;
+  OVERLAPPED overlapped;
+  overlapped.Offset = offset;
+  overlapped.OffsetHigh = 0;
+  overlapped.hEvent = NULL;
+  if(!ReadFile(hFile, buffer, count, &numberOfBytesRead, &overlapped)){
+    return 0;
+  }
+  return numberOfBytesRead;
+};
+
+static void 
+stream_close_func(FT_Stream stream){
+  HANDLE hFile = reinterpret_cast<HANDLE>(stream->descriptor.pointer);
+  CloseHandle(hFile);
+}
+#endif
+
 /*
  * Return a PangoFontDescription that will resolve to the font file
  */
@@ -200,23 +214,71 @@ get_pango_font_description(unsigned char* filepath) {
   FT_Library library;
   FT_Face face;
   PangoFontDescription *desc = pango_font_description_new();
-
+#ifdef _WIN32
+  // FT_New_Face use fopen. 
+  // Unable to find the file when supplied the multibyte string path on the Windows platform and throw error "Could not parse font file".
+  // This workaround fixes this by reading the font file uses win32 wide character API.
+  std::unique_ptr<wchar_t[]> wFilepath = u8ToWide((char*)filepath);
+  if(!wFilepath){
+    return NULL;
+  }
+  HANDLE hFile = CreateFileW(
+        wFilepath.get(),
+        GENERIC_READ,
+        FILE_SHARE_READ,
+        NULL,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        NULL
+  );
+  if(!hFile){
+    return NULL;
+  }
+  LARGE_INTEGER liSize;
+  if(!GetFileSizeEx(hFile, &liSize)) {
+    CloseHandle(hFile);
+    return NULL;
+  }
+  FT_Open_Args args;
+  args.flags = FT_OPEN_STREAM;
+  FT_StreamRec stream;
+  stream.base = NULL;
+  stream.size = liSize.QuadPart;
+  stream.pos = 0;
+  stream.descriptor.pointer = hFile;
+  stream.read = stream_read_func;
+  stream.close = stream_close_func;
+  args.stream = &stream;
+  if (
+    !FT_Init_FreeType(&library) && 
+    !FT_Open_Face(library, &args, 0, &face)) {
+#else
   if (!FT_Init_FreeType(&library) && !FT_New_Face(library, (const char*)filepath, 0, &face)) {
+#endif
     TT_OS2 *table = (TT_OS2*)FT_Get_Sfnt_Table(face, FT_SFNT_OS2);
     if (table) {
       char *family = get_family_name(face);
 
-      if (family) pango_font_description_set_family_static(desc, family);
+      if (!family) {
+        pango_font_description_free(desc);
+        FT_Done_Face(face);
+        FT_Done_FreeType(library);
+
+        return NULL;
+      }
+
+      pango_font_description_set_family(desc, family);
+      free(family);
       pango_font_description_set_weight(desc, get_pango_weight(table->usWeightClass));
       pango_font_description_set_stretch(desc, get_pango_stretch(table->usWidthClass));
       pango_font_description_set_style(desc, get_pango_style(face->style_flags));
 
       FT_Done_Face(face);
+      FT_Done_FreeType(library);
 
       return desc;
     }
   }
-
   pango_font_description_free(desc);
 
   return NULL;
@@ -234,7 +296,13 @@ register_font(unsigned char *filepath) {
   CFURLRef filepathUrl = CFURLCreateFromFileSystemRepresentation(NULL, filepath, strlen((char*)filepath), false);
   success = CTFontManagerRegisterFontsForURL(filepathUrl, kCTFontManagerScopeProcess, NULL);
   #elif defined(_WIN32)
-  success = AddFontResourceEx((LPCSTR)filepath, FR_PRIVATE, 0) != 0;
+  std::unique_ptr<wchar_t[]> wFilepath = u8ToWide((char*)filepath);
+  if(wFilepath){
+    success = AddFontResourceExW(wFilepath.get(), FR_PRIVATE, 0) != 0;
+  }else{
+    success = false;
+  }
+
   #else
   success = FcConfigAppFontAddFile(FcConfigGetCurrent(), (FcChar8 *)(filepath));
   #endif
@@ -249,3 +317,36 @@ register_font(unsigned char *filepath) {
   return true;
 }
 
+/*
+ * Deregister font from the OS
+ * Note that Linux (FontConfig) can only dereregister ALL fonts at once.
+ */
+
+bool
+deregister_font(unsigned char *filepath) {
+  bool success;
+  
+  #ifdef __APPLE__
+  CFURLRef filepathUrl = CFURLCreateFromFileSystemRepresentation(NULL, filepath, strlen((char*)filepath), false);
+  success = CTFontManagerUnregisterFontsForURL(filepathUrl, kCTFontManagerScopeProcess, NULL);
+  #elif defined(_WIN32)
+  std::unique_ptr<wchar_t[]> wFilepath = u8ToWide((char*)filepath);
+  if(wFilepath){
+    success = RemoveFontResourceExW(wFilepath.get(), FR_PRIVATE, 0) != 0;
+  }else{
+    success = false;
+  }
+  #else
+  FcConfigAppFontClear(FcConfigGetCurrent());
+  success = true;
+  #endif
+
+  if (!success) return false;
+
+  // Tell Pango to throw away the current FontMap and create a new one. This
+  // has the effect of deregistering the font in Pango by re-looking up all
+  // font families.
+  pango_cairo_font_map_set_default(NULL);
+
+  return true;
+}

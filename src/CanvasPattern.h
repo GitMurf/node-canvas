@@ -1,27 +1,33 @@
-
-//
-// CanvasPattern.h
-//
 // Copyright (c) 2011 LearnBoost <tj@learnboost.com>
-//
 
-#ifndef __NODE_PATTERN_H__
-#define __NODE_PATTERN_H__
+#pragma once
 
-#include "Canvas.h"
+#include <cairo.h>
+#include <napi.h>
 
-class Pattern: public Nan::ObjectWrap {
+/*
+ * Canvas types.
+ */
+
+typedef enum {
+  NO_REPEAT,  // match CAIRO_EXTEND_NONE
+  REPEAT,  // match CAIRO_EXTEND_REPEAT
+  REPEAT_X, // needs custom processing
+  REPEAT_Y // needs custom processing
+} repeat_type_t;
+
+extern const cairo_user_data_key_t *pattern_repeat_key;
+
+class Pattern : public Napi::ObjectWrap<Pattern> {
   public:
-    static Nan::Persistent<FunctionTemplate> constructor;
-    static void Initialize(Nan::ADDON_REGISTER_FUNCTION_ARGS_TYPE target);
-    static NAN_METHOD(New);
-    Pattern(cairo_surface_t *surface);
+    Pattern(const Napi::CallbackInfo& info);
+    static void Initialize(Napi::Env& env, Napi::Object& target);
+    void setTransform(const Napi::CallbackInfo& info);
+    static repeat_type_t get_repeat_type_for_cairo_pattern(cairo_pattern_t *pattern);
     inline cairo_pattern_t *pattern(){ return _pattern; }
-
-  private:
     ~Pattern();
-    // TODO REPEAT/REPEAT_X/REPEAT_Y
+    Napi::Env env;
+  private:
     cairo_pattern_t *_pattern;
+    repeat_type_t _repeat = REPEAT;
 };
-
-#endif

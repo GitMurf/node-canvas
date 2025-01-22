@@ -1,19 +1,11 @@
-
-
-//
-// Point.h
-//
 // Copyright (c) 2010 LearnBoost <tj@learnboost.com>
-//
+#pragma once
 
-#ifndef __NODE_POINT_H__
-#define __NODE_POINT_H__
-
-template <class T>
+template <typename T>
 class Point {
   public:
     T x, y;
-    Point(T x, T y): x(x), y(y) {}
+    Point(T x=0, T y=0): x(x), y(y) {}
+    Point(const Point&) = default;
+    Point& operator=(const Point&) = default;
 };
-
-#endif /* __NODE_POINT_H__ */

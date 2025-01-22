@@ -1,14 +1,14 @@
-
-//
-// color.cc
-//
 // Copyright (c) 2010 LearnBoost <tj@learnboost.com>
-//
 
 #include "color.h"
-#include <stdlib.h>
+
+#include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <limits>
+#include <map>
+#include <string>
 
 // Compatibility with Visual Studio versions prior to VS2015
 #if defined(_MSC_VER) && _MSC_VER < 1900
@@ -60,7 +60,7 @@ parse_css_number(const char** pStr, parsed_t *pParsed) {
    const char*& str = *pStr;
    const char* startStr = str;
    if (!str || !*str)
-       return false; 
+       return false;
    parsed_t integerPart = 0;
    parsed_t fractionPart = 0;
    int divisorForFraction = 1;
@@ -68,7 +68,7 @@ parse_css_number(const char** pStr, parsed_t *pParsed) {
    int exponent = 0;
    int digits = 0;
    bool inFraction = false;
-  
+
    if (*str == '-') {
        ++str;
        sign = -1;
@@ -83,7 +83,7 @@ parse_css_number(const char** pStr, parsed_t *pParsed) {
           }
           else {
             ++digits;
-          
+
             if (inFraction) {
                 fractionPart = fractionPart*10 + (*str - '0');
                 divisorForFraction *= 10;
@@ -137,7 +137,7 @@ clip(T value, T minValue, T maxValue) {
 /*
  * Wrap value to the range [0, limit]
  */
- 
+
 template <typename T>
 static T
 wrap_float(T value, T limit) {
@@ -159,8 +159,9 @@ wrap_float(T value, T limit) {
 
 static bool
 parse_rgb_channel(const char** pStr, uint8_t *pChannel) {
-  int channel;
-  if (parse_integer(pStr, &channel)) {
+  float f_channel;
+  if (parse_css_number(pStr, &f_channel)) {
+    int channel = (int) ceil(f_channel);
     *pChannel = clip(channel, 0, 255);
     return true;
   }
@@ -186,7 +187,7 @@ parse_degrees(const char** pStr, float *pDegrees) {
  */
 
 static bool
-parse_clipped_percentage(const char** pStr, float *pFraction) { 
+parse_clipped_percentage(const char** pStr, float *pFraction) {
   float percentage;
   bool result = parse_css_number(pStr,&percentage);
   const char*& str = *pStr;
@@ -210,6 +211,9 @@ parse_clipped_percentage(const char** pStr, float *pFraction) {
 #define WHITESPACE_OR_COMMA \
   while (' ' == *str || ',' == *str) ++str;
 
+#define WHITESPACE_OR_COMMA_OR_SLASH \
+  while (' ' == *str || ',' == *str || '/' == *str) ++str;
+
 #define CHANNEL(NAME) \
    if (!parse_rgb_channel(&str, &NAME)) \
     return 0; \
@@ -225,12 +229,25 @@ parse_clipped_percentage(const char** pStr, float *pFraction) {
 #define LIGHTNESS(NAME) SATURATION(NAME)
 
 #define ALPHA(NAME) \
-  if (*str >= '1' && *str <= '9') { \
-      NAME = 1; \
+    if (*str >= '1' && *str <= '9') { \
+      NAME = 0; \
+      float n = .1f; \
+      while(*str >='0' && *str <= '9') { \
+        NAME += (*str - '0') * n; \
+        str++; \
+      } \
+      while(*str == ' ')str++; \
+      if(*str != '%') { \
+        NAME = 1; \
+      } \
     } else { \
-      if ('0' == *str) ++str; \
+      if ('0' == *str) { \
+        NAME = 0; \
+        ++str; \
+      } \
       if ('.' == *str) { \
         ++str; \
+        NAME = 0; \
         float n = .1f; \
         while (*str >= '0' && *str <= '9') { \
           NAME += (*str++ - '0') * n; \
@@ -243,11 +260,7 @@ parse_clipped_percentage(const char** pStr, float *pFraction) {
 /*
  * Named colors.
  */
-
-static struct named_color {
-  const char *name;
-  uint32_t val;
-} named_colors[] = {
+static const std::map<std::string, uint32_t> named_colors = {
     { "transparent", 0xFFFFFF00}
   , { "aliceblue", 0xF0F8FFFF }
   , { "antiquewhite", 0xFAEBD7FF }
@@ -397,7 +410,6 @@ static struct named_color {
   , { "whitesmoke", 0xF5F5F5FF }
   , { "yellow", 0xFFFF00FF }
   , { "yellowgreen", 0x9ACD32FF }
-  , { NULL, 0 }
 };
 
 /*
@@ -457,16 +469,16 @@ rgba_create(uint32_t rgba) {
 void
 rgba_to_string(rgba_t rgba, char *buf, size_t len) {
   if (1 == rgba.a) {
-    snprintf(buf, len, "#%.2x%.2x%.2x"
-      , (int) (rgba.r * 255)
-      , (int) (rgba.g * 255)
-      , (int) (rgba.b * 255));
+    snprintf(buf, len, "#%.2x%.2x%.2x",
+      static_cast<int>(round(rgba.r * 255)),
+      static_cast<int>(round(rgba.g * 255)),
+      static_cast<int>(round(rgba.b * 255)));
   } else {
-    snprintf(buf, len, "rgba(%d, %d, %d, %.2f)"
-      , (int) (rgba.r * 255)
-      , (int) (rgba.g * 255)
-      , (int) (rgba.b * 255)
-      , rgba.a);
+    snprintf(buf, len, "rgba(%d, %d, %d, %.2f)",
+      static_cast<int>(round(rgba.r * 255)),
+      static_cast<int>(round(rgba.g * 255)),
+      static_cast<int>(round(rgba.b * 255)),
+      rgba.a);
   }
 }
 
@@ -551,6 +563,20 @@ rgba_from_rgb(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 /*
+ * Return rgba from #RRGGBBAA
+ */
+
+static int32_t
+rgba_from_hex8_string(const char *str) {
+  return rgba_from_rgba(
+    (h(str[0]) << 4) + h(str[1]),
+    (h(str[2]) << 4) + h(str[3]),
+    (h(str[4]) << 4) + h(str[5]),
+    (h(str[6]) << 4) + h(str[7])
+  );
+}
+
+/*
  * Return rgb from "#RRGGBB".
  */
 
@@ -561,6 +587,20 @@ rgba_from_hex6_string(const char *str) {
     , (h(str[2]) << 4) + h(str[3])
     , (h(str[4]) << 4) + h(str[5])
     );
+}
+
+/*
+* Return rgba from #RGBA
+*/
+
+static int32_t
+rgba_from_hex4_string(const char *str) {
+  return rgba_from_rgba(
+    (h(str[0]) << 4) + h(str[0]),
+    (h(str[1]) << 4) + h(str[1]),
+    (h(str[2]) << 4) + h(str[2]),
+    (h(str[3]) << 4) + h(str[3])
+  );
 }
 
 /*
@@ -586,13 +626,15 @@ rgba_from_rgb_string(const char *str, short *ok) {
     str += 4;
     WHITESPACE;
     uint8_t r = 0, g = 0, b = 0;
+    float a=1.f;
     CHANNEL(r);
     WHITESPACE_OR_COMMA;
     CHANNEL(g);
     WHITESPACE_OR_COMMA;
     CHANNEL(b);
-    WHITESPACE;
-    return *ok = 1, rgba_from_rgb(r, g, b);
+    WHITESPACE_OR_COMMA_OR_SLASH;
+    ALPHA(a);
+    return *ok = 1, rgba_from_rgba(r, g, b, (int) (255 * a));
   }
   return *ok = 0;
 }
@@ -607,13 +649,13 @@ rgba_from_rgba_string(const char *str, short *ok) {
     str += 5;
     WHITESPACE;
     uint8_t r = 0, g = 0, b = 0;
-    float a = 0;
+    float a = 1.f;
     CHANNEL(r);
     WHITESPACE_OR_COMMA;
     CHANNEL(g);
     WHITESPACE_OR_COMMA;
     CHANNEL(b);
-    WHITESPACE_OR_COMMA;
+    WHITESPACE_OR_COMMA_OR_SLASH;
     ALPHA(a);
     WHITESPACE;
     return *ok = 1, rgba_from_rgba(r, g, b, (int) (a * 255));
@@ -671,9 +713,11 @@ rgba_from_hsl_string(const char *str, short *ok) {
 
 /*
  * Return rgb from:
- *  
+ *
  *  - "#RGB"
+ *  - "#RGBA"
  *  - "#RRGGBB"
+ *  - "#RRGGBBAA"
  *
  */
 
@@ -681,8 +725,12 @@ static int32_t
 rgba_from_hex_string(const char *str, short *ok) {
   size_t len = strlen(str);
   *ok = 1;
-  if (6 == len) return rgba_from_hex6_string(str);
-  if (3 == len) return rgba_from_hex3_string(str);
+  switch (len) {
+    case 8: return rgba_from_hex8_string(str);
+    case 6: return rgba_from_hex6_string(str);
+    case 4: return rgba_from_hex4_string(str);
+    case 3: return rgba_from_hex3_string(str);
+  }
   return *ok = 0;
 }
 
@@ -692,20 +740,23 @@ rgba_from_hex_string(const char *str, short *ok) {
 
 static int32_t
 rgba_from_name_string(const char *str, short *ok) {
-  int i = 0;
-  struct named_color color;
-  while ((color = named_colors[i++]).name) {
-    if (*str == *color.name && 0 == strcmp(str, color.name))
-      return *ok = 1, color.val;
+  WHITESPACE;
+  std::string lowered(str);
+  std::transform(lowered.begin(), lowered.end(), lowered.begin(), tolower);
+  auto color = named_colors.find(lowered);
+  if (color != named_colors.end()) {
+    return *ok = 1, color->second;
   }
   return *ok = 0;
 }
 
 /*
  * Return rgb from:
- *  
+ *
  *  - #RGB
+ *  - #RGBA
  *  - #RRGGBB
+ *  - #RRGGBBAA
  *  - rgb(r,g,b)
  *  - rgba(r,g,b,a)
  *  - hsl(h,s,l)
@@ -716,7 +767,8 @@ rgba_from_name_string(const char *str, short *ok) {
 
 int32_t
 rgba_from_string(const char *str, short *ok) {
-  if ('#' == str[0]) 
+  WHITESPACE;
+  if ('#' == str[0])
     return rgba_from_hex_string(++str, ok);
   if (str == strstr(str, "rgba"))
     return rgba_from_rgba_string(str, ok);

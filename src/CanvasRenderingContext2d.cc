@@ -1,63 +1,40 @@
-
-//
-// CanvasRenderingContext2d.cc
-//
 // Copyright (c) 2010 LearnBoost <tj@learnboost.com>
-//
 
-#include <math.h>
-#include <stdlib.h>
-#include <limits>
-#include <vector>
-#include <algorithm>
-
-#include "Canvas.h"
-#include "Point.h"
-#include "Image.h"
-#include "ImageData.h"
 #include "CanvasRenderingContext2d.h"
+
+#include <algorithm>
+#include "backend/ImageBackend.h"
+#include <cairo-pdf.h>
+#include "Canvas.h"
 #include "CanvasGradient.h"
 #include "CanvasPattern.h"
-
-// Windows doesn't support the C99 names for these
-#ifdef _MSC_VER
-#define isnan(x) _isnan(x)
-#define isinf(x) (!_finite(x))
-#endif
-
-#ifndef isnan
-#define isnan(x) std::isnan(x)
-#define isinf(x) std::isinf(x)
-#endif
-
-Nan::Persistent<FunctionTemplate> Context2d::constructor;
+#include "InstanceData.h"
+#include "FontParser.h"
+#include <cmath>
+#include <cstdlib>
+#include "Image.h"
+#include "ImageData.h"
+#include <limits>
+#include <map>
+#include "Point.h"
+#include <string>
+#include "Util.h"
+#include <vector>
 
 /*
  * Rectangle arg assertions.
  */
 
 #define RECT_ARGS \
-  if (!info[0]->IsNumber() \
-    ||!info[1]->IsNumber() \
-    ||!info[2]->IsNumber() \
-    ||!info[3]->IsNumber()) return; \
-  double x = info[0]->NumberValue(); \
-  double y = info[1]->NumberValue(); \
-  double width = info[2]->NumberValue(); \
-  double height = info[3]->NumberValue();
+  double args[4]; \
+  if(!checkArgs(info, args, 4)) \
+    return; \
+  double x = args[0]; \
+  double y = args[1]; \
+  double width = args[2]; \
+  double height = args[3];
 
-/*
- * Text baselines.
- */
-
-enum {
-    TEXT_BASELINE_ALPHABETIC
-  , TEXT_BASELINE_TOP
-  , TEXT_BASELINE_BOTTOM
-  , TEXT_BASELINE_MIDDLE
-  , TEXT_BASELINE_IDEOGRAPHIC
-  , TEXT_BASELINE_HANGING
-};
+constexpr double twoPi = M_PI * 2.;
 
 /*
  * Simple helper macro for a rather verbose function call.
@@ -68,107 +45,196 @@ enum {
    pango_layout_get_font_description(LAYOUT), \
    pango_context_get_language(pango_layout_get_context(LAYOUT)))
 
+inline static bool checkArgs(const Napi::CallbackInfo&info, double *args, int argsNum, int offset = 0){
+  Napi::Env env = info.Env();
+  int argsEnd = std::min(9, offset + argsNum);
+  bool areArgsValid = true;
+
+  napi_value argv[9];
+  size_t argc = 9;
+  napi_get_cb_info(env, static_cast<napi_callback_info>(info), &argc, argv, nullptr, nullptr);
+
+  for (int i = offset; i < argsEnd; i++) {
+    napi_valuetype type;
+    double val = 0;
+
+    napi_typeof(env, argv[i], &type);
+    if (type == napi_number) {
+      // fast path
+      napi_get_value_double(env, argv[i], &val);
+    } else {
+      napi_value num;
+      if (napi_coerce_to_number(env, argv[i], &num) == napi_ok) {
+        napi_get_value_double(env, num, &val);
+      }
+    }
+
+    if (areArgsValid) {
+      if (!std::isfinite(val)) {
+        // We should continue the loop instead of returning immediately
+        // See https://html.spec.whatwg.org/multipage/canvas.html
+
+        areArgsValid = false;
+        continue;
+      }
+
+      args[i - offset] = val;
+    }
+  }
+
+  return areArgsValid;
+}
+
 /*
  * Initialize Context2d.
  */
 
 void
-Context2d::Initialize(Nan::ADDON_REGISTER_FUNCTION_ARGS_TYPE target) {
-  Nan::HandleScope scope;
+Context2d::Initialize(Napi::Env& env, Napi::Object& exports) {
+  Napi::HandleScope scope(env);
+  InstanceData* data = env.GetInstanceData<InstanceData>();
 
-  // Constructor
-  Local<FunctionTemplate> ctor = Nan::New<FunctionTemplate>(Context2d::New);
-  constructor.Reset(ctor);
-  ctor->InstanceTemplate()->SetInternalFieldCount(1);
-  ctor->SetClassName(Nan::New("CanvasRenderingContext2D").ToLocalChecked());
+  Napi::Function ctor = DefineClass(env, "CanvasRenderingContext2D", {
+    InstanceMethod<&Context2d::DrawImage>("drawImage", napi_default_method),
+    InstanceMethod<&Context2d::PutImageData>("putImageData", napi_default_method),
+    InstanceMethod<&Context2d::GetImageData>("getImageData", napi_default_method),
+    InstanceMethod<&Context2d::CreateImageData>("createImageData", napi_default_method),
+    InstanceMethod<&Context2d::AddPage>("addPage", napi_default_method),
+    InstanceMethod<&Context2d::Save>("save", napi_default_method),
+    InstanceMethod<&Context2d::Restore>("restore", napi_default_method),
+    InstanceMethod<&Context2d::Rotate>("rotate", napi_default_method),
+    InstanceMethod<&Context2d::Translate>("translate", napi_default_method),
+    InstanceMethod<&Context2d::Transform>("transform", napi_default_method),
+    InstanceMethod<&Context2d::GetTransform>("getTransform", napi_default_method),
+    InstanceMethod<&Context2d::ResetTransform>("resetTransform", napi_default_method),
+    InstanceMethod<&Context2d::SetTransform>("setTransform", napi_default_method),
+    InstanceMethod<&Context2d::IsPointInPath>("isPointInPath", napi_default_method),
+    InstanceMethod<&Context2d::Scale>("scale", napi_default_method),
+    InstanceMethod<&Context2d::Clip>("clip", napi_default_method),
+    InstanceMethod<&Context2d::Fill>("fill", napi_default_method),
+    InstanceMethod<&Context2d::Stroke>("stroke", napi_default_method),
+    InstanceMethod<&Context2d::FillText>("fillText", napi_default_method),
+    InstanceMethod<&Context2d::StrokeText>("strokeText", napi_default_method),
+    InstanceMethod<&Context2d::FillRect>("fillRect", napi_default_method),
+    InstanceMethod<&Context2d::StrokeRect>("strokeRect", napi_default_method),
+    InstanceMethod<&Context2d::ClearRect>("clearRect", napi_default_method),
+    InstanceMethod<&Context2d::Rect>("rect", napi_default_method),
+    InstanceMethod<&Context2d::RoundRect>("roundRect", napi_default_method),
+    InstanceMethod<&Context2d::MeasureText>("measureText", napi_default_method),
+    InstanceMethod<&Context2d::MoveTo>("moveTo", napi_default_method),
+    InstanceMethod<&Context2d::LineTo>("lineTo", napi_default_method),
+    InstanceMethod<&Context2d::BezierCurveTo>("bezierCurveTo", napi_default_method),
+    InstanceMethod<&Context2d::QuadraticCurveTo>("quadraticCurveTo", napi_default_method),
+    InstanceMethod<&Context2d::BeginPath>("beginPath", napi_default_method),
+    InstanceMethod<&Context2d::ClosePath>("closePath", napi_default_method),
+    InstanceMethod<&Context2d::Arc>("arc", napi_default_method),
+    InstanceMethod<&Context2d::ArcTo>("arcTo", napi_default_method),
+    InstanceMethod<&Context2d::Ellipse>("ellipse", napi_default_method),
+    InstanceMethod<&Context2d::SetLineDash>("setLineDash", napi_default_method),
+    InstanceMethod<&Context2d::GetLineDash>("getLineDash", napi_default_method),
+    InstanceMethod<&Context2d::CreatePattern>("createPattern", napi_default_method),
+    InstanceMethod<&Context2d::CreateLinearGradient>("createLinearGradient", napi_default_method),
+    InstanceMethod<&Context2d::CreateRadialGradient>("createRadialGradient", napi_default_method),
+    #if CAIRO_VERSION >= CAIRO_VERSION_ENCODE(1, 16, 0)
+    InstanceMethod<&Context2d::BeginTag>("beginTag", napi_default_method),
+    InstanceMethod<&Context2d::EndTag>("endTag", napi_default_method),
+    #endif
+    InstanceAccessor<&Context2d::GetFormat>("pixelFormat", napi_default_jsproperty),
+    InstanceAccessor<&Context2d::GetPatternQuality, &Context2d::SetPatternQuality>("patternQuality", napi_default_jsproperty),
+    InstanceAccessor<&Context2d::GetImageSmoothingEnabled, &Context2d::SetImageSmoothingEnabled>("imageSmoothingEnabled", napi_default_jsproperty),
+    InstanceAccessor<&Context2d::GetGlobalCompositeOperation, &Context2d::SetGlobalCompositeOperation>("globalCompositeOperation", napi_default_jsproperty),
+    InstanceAccessor<&Context2d::GetGlobalAlpha, &Context2d::SetGlobalAlpha>("globalAlpha", napi_default_jsproperty),
+    InstanceAccessor<&Context2d::GetShadowColor, &Context2d::SetShadowColor>("shadowColor", napi_default_jsproperty),
+    InstanceAccessor<&Context2d::GetMiterLimit, &Context2d::SetMiterLimit>("miterLimit", napi_default_jsproperty),
+    InstanceAccessor<&Context2d::GetLineWidth, &Context2d::SetLineWidth>("lineWidth", napi_default_jsproperty),
+    InstanceAccessor<&Context2d::GetLineCap, &Context2d::SetLineCap>("lineCap", napi_default_jsproperty),
+    InstanceAccessor<&Context2d::GetLineJoin, &Context2d::SetLineJoin>("lineJoin", napi_default_jsproperty),
+    InstanceAccessor<&Context2d::GetLineDashOffset, &Context2d::SetLineDashOffset>("lineDashOffset", napi_default_jsproperty),
+    InstanceAccessor<&Context2d::GetShadowOffsetX, &Context2d::SetShadowOffsetX>("shadowOffsetX", napi_default_jsproperty),
+    InstanceAccessor<&Context2d::GetShadowOffsetY, &Context2d::SetShadowOffsetY>("shadowOffsetY", napi_default_jsproperty),
+    InstanceAccessor<&Context2d::GetShadowBlur, &Context2d::SetShadowBlur>("shadowBlur", napi_default_jsproperty),
+    InstanceAccessor<&Context2d::GetAntiAlias, &Context2d::SetAntiAlias>("antialias", napi_default_jsproperty),
+    InstanceAccessor<&Context2d::GetTextDrawingMode, &Context2d::SetTextDrawingMode>("textDrawingMode", napi_default_jsproperty),
+    InstanceAccessor<&Context2d::GetQuality, &Context2d::SetQuality>("quality", napi_default_jsproperty),
+    InstanceAccessor<&Context2d::GetCurrentTransform, &Context2d::SetCurrentTransform>("currentTransform", napi_default_jsproperty),
+    InstanceAccessor<&Context2d::GetFillStyle, &Context2d::SetFillStyle>("fillStyle", napi_default_jsproperty),
+    InstanceAccessor<&Context2d::GetStrokeStyle, &Context2d::SetStrokeStyle>("strokeStyle", napi_default_jsproperty),
+    InstanceAccessor<&Context2d::GetFont, &Context2d::SetFont>("font", napi_default_jsproperty),
+    InstanceAccessor<&Context2d::GetTextBaseline, &Context2d::SetTextBaseline>("textBaseline", napi_default_jsproperty),
+    InstanceAccessor<&Context2d::GetTextAlign, &Context2d::SetTextAlign>("textAlign", napi_default_jsproperty),
+    InstanceAccessor<&Context2d::GetDirection, &Context2d::SetDirection>("direction", napi_default_jsproperty)
+  });
 
-  // Prototype
-  Local<ObjectTemplate> proto = ctor->PrototypeTemplate();
-  Nan::SetPrototypeMethod(ctor, "drawImage", DrawImage);
-  Nan::SetPrototypeMethod(ctor, "putImageData", PutImageData);
-  Nan::SetPrototypeMethod(ctor, "getImageData", GetImageData);
-  Nan::SetPrototypeMethod(ctor, "addPage", AddPage);
-  Nan::SetPrototypeMethod(ctor, "save", Save);
-  Nan::SetPrototypeMethod(ctor, "restore", Restore);
-  Nan::SetPrototypeMethod(ctor, "rotate", Rotate);
-  Nan::SetPrototypeMethod(ctor, "translate", Translate);
-  Nan::SetPrototypeMethod(ctor, "transform", Transform);
-  Nan::SetPrototypeMethod(ctor, "resetTransform", ResetTransform);
-  Nan::SetPrototypeMethod(ctor, "isPointInPath", IsPointInPath);
-  Nan::SetPrototypeMethod(ctor, "scale", Scale);
-  Nan::SetPrototypeMethod(ctor, "clip", Clip);
-  Nan::SetPrototypeMethod(ctor, "fill", Fill);
-  Nan::SetPrototypeMethod(ctor, "stroke", Stroke);
-  Nan::SetPrototypeMethod(ctor, "fillText", FillText);
-  Nan::SetPrototypeMethod(ctor, "strokeText", StrokeText);
-  Nan::SetPrototypeMethod(ctor, "fillRect", FillRect);
-  Nan::SetPrototypeMethod(ctor, "strokeRect", StrokeRect);
-  Nan::SetPrototypeMethod(ctor, "clearRect", ClearRect);
-  Nan::SetPrototypeMethod(ctor, "rect", Rect);
-  Nan::SetPrototypeMethod(ctor, "measureText", MeasureText);
-  Nan::SetPrototypeMethod(ctor, "moveTo", MoveTo);
-  Nan::SetPrototypeMethod(ctor, "lineTo", LineTo);
-  Nan::SetPrototypeMethod(ctor, "bezierCurveTo", BezierCurveTo);
-  Nan::SetPrototypeMethod(ctor, "quadraticCurveTo", QuadraticCurveTo);
-  Nan::SetPrototypeMethod(ctor, "beginPath", BeginPath);
-  Nan::SetPrototypeMethod(ctor, "closePath", ClosePath);
-  Nan::SetPrototypeMethod(ctor, "arc", Arc);
-  Nan::SetPrototypeMethod(ctor, "arcTo", ArcTo);
-  Nan::SetPrototypeMethod(ctor, "setLineDash", SetLineDash);
-  Nan::SetPrototypeMethod(ctor, "getLineDash", GetLineDash);
-  Nan::SetPrototypeMethod(ctor, "_setFont", SetFont);
-  Nan::SetPrototypeMethod(ctor, "_setFillColor", SetFillColor);
-  Nan::SetPrototypeMethod(ctor, "_setStrokeColor", SetStrokeColor);
-  Nan::SetPrototypeMethod(ctor, "_setFillPattern", SetFillPattern);
-  Nan::SetPrototypeMethod(ctor, "_setStrokePattern", SetStrokePattern);
-  Nan::SetPrototypeMethod(ctor, "_setTextBaseline", SetTextBaseline);
-  Nan::SetPrototypeMethod(ctor, "_setTextAlignment", SetTextAlignment);
-  Nan::SetAccessor(proto, Nan::New("patternQuality").ToLocalChecked(), GetPatternQuality, SetPatternQuality);
-  Nan::SetAccessor(proto, Nan::New("globalCompositeOperation").ToLocalChecked(), GetGlobalCompositeOperation, SetGlobalCompositeOperation);
-  Nan::SetAccessor(proto, Nan::New("globalAlpha").ToLocalChecked(), GetGlobalAlpha, SetGlobalAlpha);
-  Nan::SetAccessor(proto, Nan::New("shadowColor").ToLocalChecked(), GetShadowColor, SetShadowColor);
-  Nan::SetAccessor(proto, Nan::New("fillColor").ToLocalChecked(), GetFillColor);
-  Nan::SetAccessor(proto, Nan::New("strokeColor").ToLocalChecked(), GetStrokeColor);
-  Nan::SetAccessor(proto, Nan::New("miterLimit").ToLocalChecked(), GetMiterLimit, SetMiterLimit);
-  Nan::SetAccessor(proto, Nan::New("lineWidth").ToLocalChecked(), GetLineWidth, SetLineWidth);
-  Nan::SetAccessor(proto, Nan::New("lineCap").ToLocalChecked(), GetLineCap, SetLineCap);
-  Nan::SetAccessor(proto, Nan::New("lineJoin").ToLocalChecked(), GetLineJoin, SetLineJoin);
-  Nan::SetAccessor(proto, Nan::New("lineDashOffset").ToLocalChecked(), GetLineDashOffset, SetLineDashOffset);
-  Nan::SetAccessor(proto, Nan::New("shadowOffsetX").ToLocalChecked(), GetShadowOffsetX, SetShadowOffsetX);
-  Nan::SetAccessor(proto, Nan::New("shadowOffsetY").ToLocalChecked(), GetShadowOffsetY, SetShadowOffsetY);
-  Nan::SetAccessor(proto, Nan::New("shadowBlur").ToLocalChecked(), GetShadowBlur, SetShadowBlur);
-  Nan::SetAccessor(proto, Nan::New("antialias").ToLocalChecked(), GetAntiAlias, SetAntiAlias);
-  Nan::SetAccessor(proto, Nan::New("textDrawingMode").ToLocalChecked(), GetTextDrawingMode, SetTextDrawingMode);
-  Nan::SetAccessor(proto, Nan::New("filter").ToLocalChecked(), GetFilter, SetFilter);
-  Nan::Set(target, Nan::New("CanvasRenderingContext2d").ToLocalChecked(), ctor->GetFunction());
+  exports.Set("CanvasRenderingContext2d", ctor);
+  data->Context2dCtor = Napi::Persistent(ctor);
 }
 
 /*
  * Create a cairo context.
  */
 
-Context2d::Context2d(Canvas *canvas) {
-  _canvas = canvas;
-  _context = cairo_create(canvas->surface());
+Context2d::Context2d(const Napi::CallbackInfo& info) : Napi::ObjectWrap<Context2d>(info), env(info.Env()) {
+  InstanceData* data = env.GetInstanceData<InstanceData>();
+
+  if (!info[0].IsObject()) {
+    Napi::TypeError::New(env, "Canvas expected").ThrowAsJavaScriptException();
+    return;
+  }
+
+  Napi::Object obj = info[0].As<Napi::Object>();
+  if (!obj.InstanceOf(data->CanvasCtor.Value()).UnwrapOr(false)) {
+    if (!env.IsExceptionPending()) {
+      Napi::TypeError::New(env, "Canvas expected").ThrowAsJavaScriptException();
+    }
+    return;
+  }
+
+  _canvas = Canvas::Unwrap(obj);
+
+  bool isImageBackend = _canvas->backend()->getName() == "image";
+  if (isImageBackend) {
+    cairo_format_t format = ImageBackend::DEFAULT_FORMAT;
+
+    if (info[1].IsObject()) {
+      Napi::Object ctxAttributes = info[1].As<Napi::Object>();
+      Napi::Value pixelFormat;
+
+      if (ctxAttributes.Get("pixelFormat").UnwrapTo(&pixelFormat) && pixelFormat.IsString()) {
+        std::string utf8PixelFormat = pixelFormat.As<Napi::String>();
+        if (utf8PixelFormat == "RGBA32") format = CAIRO_FORMAT_ARGB32;
+        else if (utf8PixelFormat == "RGB24") format = CAIRO_FORMAT_RGB24;
+        else if (utf8PixelFormat == "A8") format = CAIRO_FORMAT_A8;
+        else if (utf8PixelFormat == "RGB16_565") format = CAIRO_FORMAT_RGB16_565;
+        else if (utf8PixelFormat == "A1") format = CAIRO_FORMAT_A1;
+#ifdef CAIRO_FORMAT_RGB30
+        else if (utf8PixelFormat == "RGB30") format = CAIRO_FORMAT_RGB30;
+#endif
+      }
+
+      // alpha: false forces use of RGB24
+      Napi::Value alpha;
+
+      if (ctxAttributes.Get("alpha").UnwrapTo(&alpha) && alpha.IsBoolean() && !alpha.As<Napi::Boolean>().Value()) {
+        format = CAIRO_FORMAT_RGB24;
+      }
+    }
+
+    static_cast<ImageBackend *>(_canvas->backend())->setFormat(format);
+  }
+
+  _context = _canvas->createCairoContext();
   _layout = pango_cairo_create_layout(_context);
-  cairo_set_line_width(_context, 1);
-  state = states[stateno = 0] = (canvas_state_t *) malloc(sizeof(canvas_state_t));
-  state->shadowBlur = 0;
-  state->shadowOffsetX = state->shadowOffsetY = 0;
-  state->globalAlpha = 1;
-  state->textAlignment = -1;
-  state->fillPattern = state->strokePattern = NULL;
-  state->fillGradient = state->strokeGradient = NULL;
-  state->textBaseline = TEXT_BASELINE_ALPHABETIC;
-  rgba_t transparent = { 0,0,0,1 };
-  rgba_t transparent_black = { 0,0,0,0 };
-  state->fill = transparent;
-  state->stroke = transparent;
-  state->shadow = transparent_black;
-  state->patternQuality = CAIRO_FILTER_GOOD;
-  state->textDrawingMode = TEXT_DRAW_PATHS;
-  state->fontDescription = pango_font_description_from_string("sans serif");
-  pango_font_description_set_absolute_size(state->fontDescription, 10 * PANGO_SCALE);
+
+  // As of January 2023, Pango rounds glyph positions which renders text wider
+  // or narrower than the browser. See #2184 for more information
+#if PANGO_VERSION_CHECK(1, 44, 0)
+  pango_context_set_round_glyph_positions(pango_layout_get_context(_layout), FALSE);
+#endif
+
+  pango_layout_set_auto_dir(_layout, FALSE);
+
+  states.emplace();
+  state = &states.top();
   pango_layout_set_font_description(_layout, state->fontDescription);
 }
 
@@ -177,12 +243,25 @@ Context2d::Context2d(Canvas *canvas) {
  */
 
 Context2d::~Context2d() {
-  while(stateno >= 0) {
-    pango_font_description_free(states[stateno]->fontDescription);
-    free(states[stateno--]);
-  }
-  g_object_unref(_layout);
-  cairo_destroy(_context);
+  if (_layout) g_object_unref(_layout);
+  if (_context) cairo_destroy(_context);
+  _resetPersistentHandles();
+}
+
+/*
+ * Reset canvas state.
+ */
+
+void Context2d::resetState() {
+  states.pop();
+  states.emplace();
+  pango_layout_set_font_description(_layout, state->fontDescription);
+  _resetPersistentHandles();
+}
+
+void Context2d::_resetPersistentHandles() {
+  _fillStyle.Reset();
+  _strokeStyle.Reset();
 }
 
 /*
@@ -191,13 +270,9 @@ Context2d::~Context2d() {
 
 void
 Context2d::save() {
-  if (stateno < CANVAS_MAX_STATES) {
-    cairo_save(_context);
-    states[++stateno] = (canvas_state_t *) malloc(sizeof(canvas_state_t));
-    memcpy(states[stateno], state, sizeof(canvas_state_t));
-    states[stateno]->fontDescription = pango_font_description_copy(states[stateno-1]->fontDescription);
-    state = states[stateno];
-  }
+  cairo_save(_context);
+  states.emplace(states.top());
+  state = &states.top();
 }
 
 /*
@@ -206,12 +281,10 @@ Context2d::save() {
 
 void
 Context2d::restore() {
-  if (stateno > 0) {
+  if (states.size() > 1) {
     cairo_restore(_context);
-    pango_font_description_free(states[stateno]->fontDescription);
-    free(states[stateno]);
-    states[stateno] = NULL;
-    state = states[--stateno];
+    states.pop();
+    state = &states.top();
     pango_layout_set_font_description(_layout, state->fontDescription);
   }
 }
@@ -238,15 +311,74 @@ Context2d::restorePath() {
 }
 
 /*
+ * Create temporary surface for gradient or pattern transparency
+ */
+cairo_pattern_t*
+create_transparent_gradient(cairo_pattern_t *source, float alpha) {
+  double x0;
+  double y0;
+  double x1;
+  double y1;
+  double r0;
+  double r1;
+  int count;
+  int i;
+  double offset;
+  double r;
+  double g;
+  double b;
+  double a;
+  cairo_pattern_t *newGradient;
+  cairo_pattern_type_t type = cairo_pattern_get_type(source);
+  cairo_pattern_get_color_stop_count(source, &count);
+  if (type == CAIRO_PATTERN_TYPE_LINEAR) {
+    cairo_pattern_get_linear_points (source, &x0, &y0, &x1, &y1);
+    newGradient = cairo_pattern_create_linear(x0, y0, x1, y1);
+  } else if (type == CAIRO_PATTERN_TYPE_RADIAL) {
+    cairo_pattern_get_radial_circles(source, &x0, &y0, &r0, &x1, &y1, &r1);
+    newGradient = cairo_pattern_create_radial(x0, y0, r0, x1, y1, r1);
+  } else {
+    return NULL;
+  }
+  for ( i = 0; i < count; i++ ) {
+    cairo_pattern_get_color_stop_rgba(source, i, &offset, &r, &g, &b, &a);
+    cairo_pattern_add_color_stop_rgba(newGradient, offset, r, g, b, a * alpha);
+  }
+  return newGradient;
+}
+
+cairo_pattern_t*
+create_transparent_pattern(cairo_pattern_t *source, float alpha) {
+  cairo_surface_t *surface;
+  cairo_pattern_get_surface(source, &surface);
+  int width = cairo_image_surface_get_width(surface);
+  int height = cairo_image_surface_get_height(surface);
+  cairo_surface_t *mask_surface = cairo_image_surface_create(
+    CAIRO_FORMAT_ARGB32,
+    width,
+    height);
+  cairo_t *mask_context = cairo_create(mask_surface);
+  if (cairo_status(mask_context) != CAIRO_STATUS_SUCCESS) {
+    return NULL;
+  }
+  cairo_set_source(mask_context, source);
+  cairo_paint_with_alpha(mask_context, alpha);
+  cairo_destroy(mask_context);
+  cairo_pattern_t* newPattern = cairo_pattern_create_for_surface(mask_surface);
+  cairo_surface_destroy(mask_surface);
+  return newPattern;
+}
+
+/*
  * Fill and apply shadow.
  */
 
 void
-Context2d::setFillRule(v8::Local<v8::Value> value) {
+Context2d::setFillRule(Napi::Value value) {
   cairo_fill_rule_t rule = CAIRO_FILL_RULE_WINDING;
-  if (value->IsString()) {
-    String::Utf8Value str(value);
-    if (std::strcmp(*str, "evenodd") == 0) {
+  if (value.IsString()) {
+    std::string str = value.As<Napi::String>().Utf8Value();
+    if (str == "evenodd") {
       rule = CAIRO_FILL_RULE_EVEN_ODD;
     }
   }
@@ -255,17 +387,72 @@ Context2d::setFillRule(v8::Local<v8::Value> value) {
 
 void
 Context2d::fill(bool preserve) {
+  cairo_pattern_t *new_pattern;
+  bool needsRestore = false;
   if (state->fillPattern) {
-    cairo_set_source(_context, state->fillPattern);
-    cairo_pattern_set_extend(cairo_get_source(_context), CAIRO_EXTEND_REPEAT);
-    // TODO repeat/repeat-x/repeat-y
+    if (state->globalAlpha < 1) {
+      new_pattern = create_transparent_pattern(state->fillPattern, state->globalAlpha);
+      if (new_pattern == NULL) {
+        Napi::Error::New(env, "Failed to initialize context").ThrowAsJavaScriptException();
+        // failed to allocate
+        return;
+      }
+      cairo_set_source(_context, new_pattern);
+      cairo_pattern_destroy(new_pattern);
+    } else {
+      cairo_pattern_set_filter(state->fillPattern, state->patternQuality);
+      cairo_set_source(_context, state->fillPattern);
+    }
+    repeat_type_t repeat = Pattern::get_repeat_type_for_cairo_pattern(state->fillPattern);
+    if (repeat == NO_REPEAT) {
+      cairo_pattern_set_extend(cairo_get_source(_context), CAIRO_EXTEND_NONE);
+    } else if (repeat == REPEAT) {
+      cairo_pattern_set_extend(cairo_get_source(_context), CAIRO_EXTEND_REPEAT);
+    } else {
+      cairo_save(_context);
+      cairo_path_t *savedPath = cairo_copy_path(_context);
+      cairo_surface_t *patternSurface = nullptr;
+      cairo_pattern_get_surface(cairo_get_source(_context), &patternSurface);
+
+      double width, height;
+      if (repeat == REPEAT_X) {
+        double x1, x2;
+        cairo_path_extents(_context, &x1, nullptr, &x2, nullptr);
+        width = x2 - x1;
+        height = cairo_image_surface_get_height(patternSurface);
+      } else {
+        double y1, y2;
+        cairo_path_extents(_context, nullptr, &y1, nullptr, &y2);
+        width = cairo_image_surface_get_width(patternSurface);
+        height = y2 - y1;
+      }
+
+      cairo_new_path(_context);
+      cairo_rectangle(_context, 0, 0, width, height);
+      cairo_clip(_context);
+      cairo_append_path(_context, savedPath);
+      cairo_path_destroy(savedPath);
+      cairo_pattern_set_extend(cairo_get_source(_context), CAIRO_EXTEND_REPEAT);
+      needsRestore = true;
+    }
   } else if (state->fillGradient) {
-    cairo_pattern_set_filter(state->fillGradient, state->patternQuality);
-    cairo_set_source(_context, state->fillGradient);
+    if (state->globalAlpha < 1) {
+      new_pattern = create_transparent_gradient(state->fillGradient, state->globalAlpha);
+      if (new_pattern == NULL) {
+        Napi::Error::New(env, "Unexpected gradient type").ThrowAsJavaScriptException();
+        // failed to recognize gradient
+        return;
+      }
+      cairo_pattern_set_filter(new_pattern, state->patternQuality);
+      cairo_set_source(_context, new_pattern);
+      cairo_pattern_destroy(new_pattern);
+    } else {
+      cairo_pattern_set_filter(state->fillGradient, state->patternQuality);
+      cairo_set_source(_context, state->fillGradient);
+    }
   } else {
     setSourceRGBA(state->fill);
   }
-
   if (preserve) {
     hasShadow()
       ? shadow(cairo_fill_preserve)
@@ -275,6 +462,9 @@ Context2d::fill(bool preserve) {
       ? shadow(cairo_fill)
       : cairo_fill(_context);
   }
+  if (needsRestore) {
+    cairo_restore(_context);
+  }
 }
 
 /*
@@ -283,12 +473,42 @@ Context2d::fill(bool preserve) {
 
 void
 Context2d::stroke(bool preserve) {
+  cairo_pattern_t *new_pattern;
   if (state->strokePattern) {
-    cairo_set_source(_context, state->strokePattern);
-    cairo_pattern_set_extend(cairo_get_source(_context), CAIRO_EXTEND_REPEAT);
+    if (state->globalAlpha < 1) {
+      new_pattern = create_transparent_pattern(state->strokePattern, state->globalAlpha);
+      if (new_pattern == NULL) {
+        Napi::Error::New(env, "Failed to initialize context").ThrowAsJavaScriptException();
+        // failed to allocate
+        return;
+      }
+      cairo_set_source(_context, new_pattern);
+      cairo_pattern_destroy(new_pattern);
+    } else {
+      cairo_pattern_set_filter(state->strokePattern, state->patternQuality);
+      cairo_set_source(_context, state->strokePattern);
+    }
+    repeat_type_t repeat = Pattern::get_repeat_type_for_cairo_pattern(state->strokePattern);
+    if (NO_REPEAT == repeat) {
+      cairo_pattern_set_extend(cairo_get_source(_context), CAIRO_EXTEND_NONE);
+    } else {
+      cairo_pattern_set_extend(cairo_get_source(_context), CAIRO_EXTEND_REPEAT);
+    }
   } else if (state->strokeGradient) {
-    cairo_pattern_set_filter(state->strokeGradient, state->patternQuality);
-    cairo_set_source(_context, state->strokeGradient);
+    if (state->globalAlpha < 1) {
+      new_pattern = create_transparent_gradient(state->strokeGradient, state->globalAlpha);
+      if (new_pattern == NULL) {
+        Napi::Error::New(env, "Unexpected gradient type").ThrowAsJavaScriptException();
+        // failed to recognize gradient
+        return;
+      }
+      cairo_pattern_set_filter(new_pattern, state->patternQuality);
+      cairo_set_source(_context, new_pattern);
+      cairo_pattern_destroy(new_pattern);
+    } else {
+      cairo_pattern_set_filter(state->strokeGradient, state->patternQuality);
+      cairo_set_source(_context, state->strokeGradient);
+    }
   } else {
     setSourceRGBA(state->stroke);
   }
@@ -344,6 +564,16 @@ Context2d::shadow(void (fn)(cairo_t *cr)) {
     // transform path to the right place
     cairo_translate(shadow_context, pad-x1, pad-y1);
     cairo_transform(shadow_context, &path_matrix);
+
+    // set lineCap lineJoin lineDash
+    cairo_set_line_cap(shadow_context, cairo_get_line_cap(_context));
+    cairo_set_line_join(shadow_context, cairo_get_line_join(_context));
+
+    double offset;
+    int dashes = cairo_get_dash_count(_context);
+    std::vector<double> a(dashes);
+    cairo_get_dash(_context, a.data(), &offset);
+    cairo_set_dash(shadow_context, a.data(), dashes, offset);
 
     // draw the path and blur
     cairo_set_line_width(shadow_context, cairo_get_line_width(_context));
@@ -434,8 +664,8 @@ Context2d::blur(cairo_surface_t *surface, int radius) {
   // get width, height
   int width = cairo_image_surface_get_width( surface );
   int height = cairo_image_surface_get_height( surface );
-  unsigned* precalc =
-      (unsigned*)malloc(width*height*sizeof(unsigned));
+  const unsigned int size = width * height * sizeof(unsigned);
+  unsigned* precalc = (unsigned*)malloc(size);
   cairo_surface_flush( surface );
   unsigned char* src = cairo_image_surface_get_data( surface );
   double mul=1.f/((radius*2)*(radius*2));
@@ -454,6 +684,8 @@ Context2d::blur(cairo_surface_t *surface, int radius) {
           unsigned char* pix = src;
           unsigned* pre = precalc;
 
+          bool modified = false;
+
           pix += channel;
           for (y=0;y<height;y++) {
               for (x=0;x<width;x++) {
@@ -462,8 +694,13 @@ Context2d::blur(cairo_surface_t *surface, int radius) {
                   if (y>0) tot+=pre[-width];
                   if (x>0 && y>0) tot-=pre[-width-1];
                   *pre++=tot;
+                  if (!modified) modified = true;
                   pix += 4;
               }
+          }
+
+          if (!modified) {
+              memset(precalc, 0, size);
           }
 
           // blur step.
@@ -489,34 +726,64 @@ Context2d::blur(cairo_surface_t *surface, int radius) {
 }
 
 /*
- * Initialize a new Context2d with the given canvas.
- */
+* Get format (string).
+*/
 
-NAN_METHOD(Context2d::New) {
-  if (!info.IsConstructCall()) {
-    return Nan::ThrowTypeError("Class constructors cannot be invoked without 'new'");
+Napi::Value
+Context2d::GetFormat(const Napi::CallbackInfo& info) {
+  std::string pixelFormatString;
+  switch (canvas()->backend()->getFormat()) {
+  case CAIRO_FORMAT_ARGB32: pixelFormatString = "RGBA32"; break;
+  case CAIRO_FORMAT_RGB24: pixelFormatString = "RGB24"; break;
+  case CAIRO_FORMAT_A8: pixelFormatString = "A8"; break;
+  case CAIRO_FORMAT_A1: pixelFormatString = "A1"; break;
+  case CAIRO_FORMAT_RGB16_565: pixelFormatString = "RGB16_565"; break;
+#ifdef CAIRO_FORMAT_RGB30
+  case CAIRO_FORMAT_RGB30: pixelFormatString = "RGB30"; break;
+#endif
+  default: return env.Null();
   }
-
-  Local<Object> obj = info[0]->ToObject();
-  if (!Nan::New(Canvas::constructor)->HasInstance(obj))
-    return Nan::ThrowTypeError("Canvas expected");
-  Canvas *canvas = Nan::ObjectWrap::Unwrap<Canvas>(obj);
-  Context2d *context = new Context2d(canvas);
-  context->Wrap(info.This());
-  info.GetReturnValue().Set(info.This());
+  return Napi::String::New(env, pixelFormatString);
 }
 
 /*
  * Create a new page.
  */
 
-NAN_METHOD(Context2d::AddPage) {
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  if (!context->canvas()->isPDF()) {
-    return Nan::ThrowError("only PDF canvases support .nextPage()");
+void
+Context2d::AddPage(const Napi::CallbackInfo& info) {
+  if (canvas()->backend()->getName() != "pdf") {
+    Napi::Error::New(env, "only PDF canvases support .addPage()").ThrowAsJavaScriptException();
+    return;
   }
-  cairo_show_page(context->context());
-  return;
+  cairo_show_page(context());
+  Napi::Number zero = Napi::Number::New(env, 0);
+  int width = info[0].ToNumber().UnwrapOr(zero).Int32Value();
+  int height = info[1].ToNumber().UnwrapOr(zero).Int32Value();
+  if (width < 1) width = canvas()->getWidth();
+  if (height < 1) height = canvas()->getHeight();
+  cairo_pdf_surface_set_size(canvas()->surface(), width, height);
+}
+
+/*
+ * Get text direction.
+ */
+Napi::Value
+Context2d::GetDirection(const Napi::CallbackInfo& info) {
+  return Napi::String::New(env, state->direction);
+}
+
+/*
+ * Set text direction.
+ */
+void
+Context2d::SetDirection(const Napi::CallbackInfo& info, const Napi::Value& value) {
+  if (!value.IsString()) return;
+
+  std::string dir = value.As<Napi::String>();
+  if (dir != "ltr" && dir != "rtl") return;
+
+  state->direction = dir;
 }
 
 /*
@@ -527,45 +794,52 @@ NAN_METHOD(Context2d::AddPage) {
  *
  */
 
-NAN_METHOD(Context2d::PutImageData) {
-  if (!info[0]->IsObject())
-    return Nan::ThrowTypeError("ImageData expected");
-  Local<Object> obj = info[0]->ToObject();
-  if (!Nan::New(ImageData::constructor)->HasInstance(obj))
-    return Nan::ThrowTypeError("ImageData expected");
+void
+Context2d::PutImageData(const Napi::CallbackInfo& info) {
+  if (!info[0].IsObject()) {
+    Napi::TypeError::New(env, "ImageData expected").ThrowAsJavaScriptException();
+    return;
+  }
+  Napi::Object obj = info[0].As<Napi::Object>();
+  InstanceData* data = env.GetInstanceData<InstanceData>();
+  if (!obj.InstanceOf(data->ImageDataCtor.Value()).UnwrapOr(false)) {
+    if (!env.IsExceptionPending()) {
+      Napi::TypeError::New(env, "ImageData expected").ThrowAsJavaScriptException();
+    }
+    return;
+  }
 
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  ImageData *imageData = Nan::ObjectWrap::Unwrap<ImageData>(obj);
+  ImageData *imageData = ImageData::Unwrap(obj);
+  Napi::Number zero = Napi::Number::New(env, 0);
 
   uint8_t *src = imageData->data();
-  uint8_t *dst = context->canvas()->data();
+  uint8_t *dst = canvas()->data();
 
-  int srcStride = imageData->stride()
-    , dstStride = context->canvas()->stride();
+  int dstStride = canvas()->stride();
+  int Bpp = dstStride / canvas()->getWidth();
+  int srcStride = Bpp * imageData->width();
 
   int sx = 0
     , sy = 0
     , sw = 0
     , sh = 0
-    , dx = info[1]->Int32Value()
-    , dy = info[2]->Int32Value()
+    , dx = info[1].ToNumber().UnwrapOr(zero).Int32Value()
+    , dy = info[2].ToNumber().UnwrapOr(zero).Int32Value()
     , rows
     , cols;
 
   switch (info.Length()) {
     // imageData, dx, dy
     case 3:
-      // Need to wrap std::min calls using parens to prevent macro expansion on
-      // windows. See http://stackoverflow.com/questions/5004858/stdmin-gives-error
-      cols = (std::min)(imageData->width(), context->canvas()->width - dx);
-      rows = (std::min)(imageData->height(), context->canvas()->height - dy);
+      sw = imageData->width();
+      sh = imageData->height();
       break;
     // imageData, dx, dy, sx, sy, sw, sh
     case 7:
-      sx = info[3]->Int32Value();
-      sy = info[4]->Int32Value();
-      sw = info[5]->Int32Value();
-      sh = info[6]->Int32Value();
+      sx = info[3].ToNumber().UnwrapOr(zero).Int32Value();
+      sy = info[4].ToNumber().UnwrapOr(zero).Int32Value();
+      sw = info[5].ToNumber().UnwrapOr(zero).Int32Value();
+      sh = info[6].ToNumber().UnwrapOr(zero).Int32Value();
       // fix up negative height, width
       if (sw < 0) sx += sw, sw = -sw;
       if (sh < 0) sy += sh, sh = -sh;
@@ -578,60 +852,134 @@ NAN_METHOD(Context2d::PutImageData) {
       // start destination at source offset
       dx += sx;
       dy += sy;
-      // chop off outlying source data
-      if (dx < 0) sw += dx, sx -= dx, dx = 0;
-      if (dy < 0) sh += dy, sy -= dy, dy = 0;
-      // clamp width at canvas size
-      // Need to wrap std::min calls using parens to prevent macro expansion on
-      // windows. See http://stackoverflow.com/questions/5004858/stdmin-gives-error
-      cols = (std::min)(sw, context->canvas()->width - dx);
-      rows = (std::min)(sh, context->canvas()->height - dy);
       break;
     default:
-      return Nan::ThrowError("invalid arguments");
+      Napi::Error::New(env, "invalid arguments").ThrowAsJavaScriptException();
+      return;
   }
+
+  // chop off outlying source data
+  if (dx < 0) sw += dx, sx -= dx, dx = 0;
+  if (dy < 0) sh += dy, sy -= dy, dy = 0;
+  // clamp width at canvas size
+  // Need to wrap std::min calls using parens to prevent macro expansion on
+  // windows. See http://stackoverflow.com/questions/5004858/stdmin-gives-error
+  cols = (std::min)(sw, canvas()->getWidth() - dx);
+  rows = (std::min)(sh, canvas()->getHeight() - dy);
 
   if (cols <= 0 || rows <= 0) return;
 
-  src += sy * srcStride + sx * 4;
-  dst += dstStride * dy + 4 * dx;
-  for (int y = 0; y < rows; ++y) {
-    uint8_t *dstRow = dst;
-    uint8_t *srcRow = src;
-    for (int x = 0; x < cols; ++x) {
-      // rgba
-      uint8_t r = *srcRow++;
-      uint8_t g = *srcRow++;
-      uint8_t b = *srcRow++;
-      uint8_t a = *srcRow++;
+  switch (canvas()->backend()->getFormat()) {
+  case CAIRO_FORMAT_ARGB32: {
+    src += sy * srcStride + sx * 4;
+    dst += dstStride * dy + 4 * dx;
+    for (int y = 0; y < rows; ++y) {
+      uint8_t *dstRow = dst;
+      uint8_t *srcRow = src;
+      for (int x = 0; x < cols; ++x) {
+        // rgba
+        uint8_t r = *srcRow++;
+        uint8_t g = *srcRow++;
+        uint8_t b = *srcRow++;
+        uint8_t a = *srcRow++;
 
-      // argb
-      // performance optimization: fully transparent/opaque pixels can be
-      // processed more efficiently.
-      if (a == 0) {
-        *dstRow++ = 0;
-        *dstRow++ = 0;
-        *dstRow++ = 0;
-        *dstRow++ = 0;
-      } else if (a == 255) {
+        // argb
+        // performance optimization: fully transparent/opaque pixels can be
+        // processed more efficiently.
+        if (a == 0) {
+          *dstRow++ = 0;
+          *dstRow++ = 0;
+          *dstRow++ = 0;
+          *dstRow++ = 0;
+        } else if (a == 255) {
+          *dstRow++ = b;
+          *dstRow++ = g;
+          *dstRow++ = r;
+          *dstRow++ = a;
+        } else {
+          float alpha = (float)a / 255;
+          *dstRow++ = b * alpha;
+          *dstRow++ = g * alpha;
+          *dstRow++ = r * alpha;
+          *dstRow++ = a;
+        }
+      }
+      dst += dstStride;
+      src += srcStride;
+    }
+    break;
+  }
+  case CAIRO_FORMAT_RGB24: {
+    src += sy * srcStride + sx * 4;
+    dst += dstStride * dy + 4 * dx;
+    for (int y = 0; y < rows; ++y) {
+      uint8_t *dstRow = dst;
+      uint8_t *srcRow = src;
+      for (int x = 0; x < cols; ++x) {
+        // rgba
+        uint8_t r = *srcRow++;
+        uint8_t g = *srcRow++;
+        uint8_t b = *srcRow++;
+        srcRow++;
+
+        // argb
         *dstRow++ = b;
         *dstRow++ = g;
         *dstRow++ = r;
-        *dstRow++ = a;
-      } else {
-        float alpha = (float)a / 255;
-        *dstRow++ = b * alpha;
-        *dstRow++ = g * alpha;
-        *dstRow++ = r * alpha;
-        *dstRow++ = a;
+        *dstRow++ = 255;
+      }
+      dst += dstStride;
+      src += srcStride;
+    }
+    break;
+  }
+  case CAIRO_FORMAT_A8: {
+    src += sy * srcStride + sx;
+    dst += dstStride * dy + dx;
+    if (srcStride == dstStride && cols == dstStride) {
+      // fast path: strides are the same and doing a full-width put
+      memcpy(dst, src, cols * rows);
+    } else {
+      for (int y = 0; y < rows; ++y) {
+        memcpy(dst, src, cols);
+        dst += dstStride;
+        src += srcStride;
       }
     }
-    dst += dstStride;
-    src += srcStride;
+    break;
+  }
+  case CAIRO_FORMAT_A1: {
+    // TODO Should this be totally packed, or maintain a stride divisible by 4?
+    Napi::Error::New(env, "putImageData for CANVAS_FORMAT_A1 is not yet implemented").ThrowAsJavaScriptException();
+
+    break;
+  }
+  case CAIRO_FORMAT_RGB16_565: {
+    src += sy * srcStride + sx * 2;
+    dst += dstStride * dy + 2 * dx;
+    for (int y = 0; y < rows; ++y) {
+      memcpy(dst, src, cols * 2);
+      dst += dstStride;
+      src += srcStride;
+    }
+    break;
+  }
+#ifdef CAIRO_FORMAT_RGB30
+  case CAIRO_FORMAT_RGB30: {
+    // TODO
+    Napi::Error::New(env, "putImageData for CANVAS_FORMAT_RGB30 is not yet implemented").ThrowAsJavaScriptException();
+
+    break;
+  }
+#endif
+  default: {
+    Napi::Error::New(env, "Invalid pixel format or not an image canvas").ThrowAsJavaScriptException();
+    return;
+  }
   }
 
   cairo_surface_mark_dirty_rectangle(
-      context->canvas()->surface()
+      canvas()->surface()
     , dx
     , dy
     , cols
@@ -645,19 +993,36 @@ NAN_METHOD(Context2d::PutImageData) {
  *
  */
 
-NAN_METHOD(Context2d::GetImageData) {
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  Canvas *canvas = context->canvas();
+Napi::Value
+Context2d::GetImageData(const Napi::CallbackInfo& info) {
+  Napi::Number zero = Napi::Number::New(env, 0);
+  Canvas *canvas = this->canvas();
 
-  int sx = info[0]->Int32Value();
-  int sy = info[1]->Int32Value();
-  int sw = info[2]->Int32Value();
-  int sh = info[3]->Int32Value();
+  int sx = info[0].ToNumber().UnwrapOr(zero).Int32Value();
+  int sy = info[1].ToNumber().UnwrapOr(zero).Int32Value();
+  int sw = info[2].ToNumber().UnwrapOr(zero).Int32Value();
+  int sh = info[3].ToNumber().UnwrapOr(zero).Int32Value();
 
-  if (!sw)
-    return Nan::ThrowError("IndexSizeError: The source width is 0.");
-  if (!sh)
-    return Nan::ThrowError("IndexSizeError: The source height is 0.");
+  if (!sw) {
+    Napi::Error::New(env, "IndexSizeError: The source width is 0.").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  if (!sh) {
+    Napi::Error::New(env, "IndexSizeError: The source height is 0.").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+
+  int width = canvas->getWidth();
+  int height = canvas->getHeight();
+
+  if (!width) {
+    Napi::TypeError::New(env, "Canvas width is 0").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  if (!height) {
+    Napi::TypeError::New(env, "Canvas height is 0").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
 
   // WebKit and Firefox have this behavior:
   // Flip the coordinates so the origin is top/left-most:
@@ -670,83 +1035,203 @@ NAN_METHOD(Context2d::GetImageData) {
     sh = -sh;
   }
 
-  if (sx + sw > canvas->width) sw = canvas->width - sx;
-  if (sy + sh > canvas->height) sh = canvas->height - sy;
+  // Width and height to actually copy
+  int cw = sw;
+  int ch = sh;
+  // Offsets in the destination image
+  int ox = 0;
+  int oy = 0;
 
-  // WebKit/moz functionality. node-canvas used to return in either case.
-  if (sw <= 0) sw = 1;
-  if (sh <= 0) sh = 1;
+  // Clamp the copy width and height if the copy would go outside the image
+  if (sx + sw > width) cw = width - sx;
+  if (sy + sh > height) ch = height - sy;
 
-  // Non-compliant. "Pixels outside the canvas must be returned as transparent
-  // black." This instead clips the returned array to the canvas area.
+  // Clamp the copy origin if the copy would go outside the image
   if (sx < 0) {
-    sw += sx;
+    ox = -sx;
+    cw += sx;
     sx = 0;
   }
   if (sy < 0) {
-    sh += sy;
+    oy = -sy;
+    ch += sy;
     sy = 0;
   }
 
-  int size = sw * sh * 4;
-
   int srcStride = canvas->stride();
-  int dstStride = sw * 4;
+  int bpp = srcStride / width;
+  int size = sw * sh * bpp;
+  int dstStride = sw * bpp;
 
   uint8_t *src = canvas->data();
 
-#if NODE_MAJOR_VERSION == 0 && NODE_MINOR_VERSION <= 10
-  Local<Object> global = Context::GetCurrent()->Global();
+  Napi::ArrayBuffer buffer = Napi::ArrayBuffer::New(env, size);
+  Napi::TypedArray dataArray;
 
-  Local<Int32> sizeHandle = Nan::New(size);
-  Local<Value> caargv[] = { sizeHandle };
-  Local<Object> clampedArray = global->Get(Nan::New("Uint8ClampedArray").ToLocalChecked()).As<Function>()->NewInstance(1, caargv);
-#else
-  Local<ArrayBuffer> buffer = ArrayBuffer::New(Isolate::GetCurrent(), size);
-  Local<Uint8ClampedArray> clampedArray = Uint8ClampedArray::New(buffer, 0, size);
-#endif
+  if (canvas->backend()->getFormat() == CAIRO_FORMAT_RGB16_565) {
+    dataArray = Napi::Uint16Array::New(env, size >> 1, buffer, 0);
+  } else {
+    dataArray = Napi::Uint8Array::New(env, size, buffer, 0, napi_uint8_clamped_array);
+  }
 
-  Nan::TypedArrayContents<uint8_t> typedArrayContents(clampedArray);
-  uint8_t* dst = *typedArrayContents;
+  uint8_t *dst = (uint8_t *)buffer.Data();
 
-  // Normalize data (argb -> rgba)
-  for (int y = 0; y < sh; ++y) {
+  if (!(cw > 0 && ch > 0)) goto return_empty;
+
+  switch (canvas->backend()->getFormat()) {
+  case CAIRO_FORMAT_ARGB32: {
+    dst += oy * dstStride + ox * 4;
+    // Rearrange alpha (argb -> rgba), undo alpha pre-multiplication,
+    // and store in big-endian format
+    for (int y = 0; y < ch; ++y) {
+      uint32_t *row = (uint32_t *)(src + srcStride * (y + sy));
+      for (int x = 0; x < cw; ++x) {
+        int bx = x * 4;
+        uint32_t *pixel = row + x + sx;
+        uint8_t a = *pixel >> 24;
+        uint8_t r = *pixel >> 16;
+        uint8_t g = *pixel >> 8;
+        uint8_t b = *pixel;
+        dst[bx + 3] = a;
+
+        // Performance optimization: fully transparent/opaque pixels can be
+        // processed more efficiently.
+        if (a == 0 || a == 255) {
+          dst[bx + 0] = r;
+          dst[bx + 1] = g;
+          dst[bx + 2] = b;
+        } else {
+          // Undo alpha pre-multiplication
+          float alphaR = (float)255 / a;
+          dst[bx + 0] = (int)((float)r * alphaR);
+          dst[bx + 1] = (int)((float)g * alphaR);
+          dst[bx + 2] = (int)((float)b * alphaR);
+        }
+
+      }
+      dst += dstStride;
+    }
+    break;
+  }
+  case CAIRO_FORMAT_RGB24: {
+    dst += oy * dstStride + ox * 4;
+  // Rearrange alpha (argb -> rgba) and store in big-endian format
+    for (int y = 0; y < ch; ++y) {
     uint32_t *row = (uint32_t *)(src + srcStride * (y + sy));
-    for (int x = 0; x < sw; ++x) {
+    for (int x = 0; x < cw; ++x) {
       int bx = x * 4;
       uint32_t *pixel = row + x + sx;
-      uint8_t a = *pixel >> 24;
       uint8_t r = *pixel >> 16;
       uint8_t g = *pixel >> 8;
       uint8_t b = *pixel;
-      dst[bx + 3] = a;
 
-      // Performance optimization: fully transparent/opaque pixels can be
-      // processed more efficiently.
-      if (a == 0 || a == 255) {
-        dst[bx + 0] = r;
-        dst[bx + 1] = g;
-        dst[bx + 2] = b;
-      } else {
-        float alpha = (float)a / 255;
-        dst[bx + 0] = (int)((float)r / alpha);
-        dst[bx + 1] = (int)((float)g / alpha);
-        dst[bx + 2] = (int)((float)b / alpha);
-      }
-
+      dst[bx + 0] = r;
+      dst[bx + 1] = g;
+      dst[bx + 2] = b;
+      dst[bx + 3] = 255;
     }
     dst += dstStride;
+    }
+    break;
+  }
+  case CAIRO_FORMAT_A8: {
+    dst += oy * dstStride + ox;
+    for (int y = 0; y < ch; ++y) {
+      uint8_t *row = (uint8_t *)(src + srcStride * (y + sy));
+      memcpy(dst, row + sx, cw);
+      dst += dstStride;
+    }
+    break;
+  }
+  case CAIRO_FORMAT_A1: {
+    // TODO Should this be totally packed, or maintain a stride divisible by 4?
+    Napi::Error::New(env, "getImageData for CANVAS_FORMAT_A1 is not yet implemented").ThrowAsJavaScriptException();
+
+    break;
+  }
+  case CAIRO_FORMAT_RGB16_565: {
+    dst += oy * dstStride + ox * 2;
+    for (int y = 0; y < ch; ++y) {
+      uint16_t *row = (uint16_t *)(src + srcStride * (y + sy));
+      memcpy(dst, row + sx, cw * 2);
+      dst += dstStride;
+    }
+    break;
+  }
+#ifdef CAIRO_FORMAT_RGB30
+  case CAIRO_FORMAT_RGB30: {
+    // TODO
+    Napi::Error::New(env, "getImageData for CANVAS_FORMAT_RGB30 is not yet implemented").ThrowAsJavaScriptException();
+
+    break;
+  }
+#endif
+  default: {
+    // Unlikely
+    Napi::Error::New(env, "Invalid pixel format or not an image canvas").ThrowAsJavaScriptException();
+    return env.Null();
+  }
   }
 
-  const int argc = 3;
-  Local<Int32> swHandle = Nan::New(sw);
-  Local<Int32> shHandle = Nan::New(sh);
-  Local<Value> argv[argc] = { clampedArray, swHandle, shHandle };
+return_empty:
+  Napi::Number swHandle = Napi::Number::New(env, sw);
+  Napi::Number shHandle = Napi::Number::New(env, sh);
+  Napi::Function ctor = env.GetInstanceData<InstanceData>()->ImageDataCtor.Value();
+  Napi::Maybe<Napi::Object> ret = ctor.New({ dataArray, swHandle, shHandle });
 
-  Local<Function> constructor = Nan::GetFunction(Nan::New(ImageData::constructor)).ToLocalChecked();
-  Local<Object> instance = Nan::NewInstance(constructor, argc, argv).ToLocalChecked();
+  return ret.IsJust() ? ret.Unwrap() : env.Undefined();
+}
 
-  info.GetReturnValue().Set(instance);
+/**
+ * Create `ImageData` with the given dimensions or
+ * `ImageData` instance for dimensions.
+ */
+
+Napi::Value
+Context2d::CreateImageData(const Napi::CallbackInfo& info){
+  Canvas *canvas = this->canvas();
+  Napi::Number zero = Napi::Number::New(env, 0);
+  int32_t width, height;
+
+  if (info[0].IsObject()) {
+    Napi::Object obj = info[0].As<Napi::Object>();
+    width = obj.Get("width").UnwrapOr(zero).ToNumber().UnwrapOr(zero).Int32Value();
+    height = obj.Get("height").UnwrapOr(zero).ToNumber().UnwrapOr(zero).Int32Value();
+  } else {
+    width = info[0].ToNumber().UnwrapOr(zero).Int32Value();
+    height = info[1].ToNumber().UnwrapOr(zero).Int32Value();
+  }
+
+  int stride = canvas->stride();
+  double Bpp = static_cast<double>(stride) / canvas->getWidth();
+  int nBytes = static_cast<int>(Bpp * width * height + .5);
+
+  Napi::ArrayBuffer ab = Napi::ArrayBuffer::New(env, nBytes);
+  Napi::Value arr;
+
+  if (canvas->backend()->getFormat() == CAIRO_FORMAT_RGB16_565)
+    arr = Napi::Uint16Array::New(env, nBytes / 2, ab, 0);
+  else
+    arr = Napi::Uint8Array::New(env, nBytes, ab, 0, napi_uint8_clamped_array);
+
+  Napi::Function ctor = env.GetInstanceData<InstanceData>()->ImageDataCtor.Value();
+  Napi::Maybe<Napi::Object> ret = ctor.New({ arr, Napi::Number::New(env, width), Napi::Number::New(env, height) });
+
+  return ret.IsJust() ? ret.Unwrap() : env.Undefined();
+}
+
+/*
+ * Take a transform matrix and return its components
+ * 0: angle, 1: scaleX, 2: scaleY, 3: skewX, 4: translateX, 5: translateY
+ */
+void decompose_matrix(cairo_matrix_t matrix, double *destination) {
+  double denom = pow(matrix.xx, 2) + pow(matrix.yx, 2);
+  destination[0] = atan2(matrix.yx, matrix.xx);
+  destination[1] = sqrt(denom);
+  destination[2] = (matrix.xx * matrix.yy - matrix.xy * matrix.yx) / destination[1];
+  destination[3] = atan2(matrix.xx * matrix.xy + matrix.yx * matrix.yy, denom);
+  destination[4] = matrix.x0;
+  destination[5] = matrix.y0;
 }
 
 /*
@@ -758,103 +1243,181 @@ NAN_METHOD(Context2d::GetImageData) {
  *
  */
 
-NAN_METHOD(Context2d::DrawImage) {
-  if (info.Length() < 3)
-    return Nan::ThrowTypeError("invalid arguments");
+void
+Context2d::DrawImage(const Napi::CallbackInfo& info) {
+  int infoLen = info.Length();
 
-  float sx = 0
+  if (infoLen != 3 && infoLen != 5 && infoLen != 9) {
+    Napi::TypeError::New(env, "Invalid arguments").ThrowAsJavaScriptException();
+    return;
+  }
+
+  if (!info[0].IsObject()) {
+    Napi::TypeError::New(env, "The first argument must be an object").ThrowAsJavaScriptException();
+    return;
+  }
+
+  double args[8];
+  if(!checkArgs(info, args, infoLen - 1, 1))
+    return;
+
+  double sx = 0
     , sy = 0
     , sw = 0
     , sh = 0
-    , dx, dy, dw, dh;
+    , dx = 0
+    , dy = 0
+    , dw = 0
+    , dh = 0
+    , source_w = 0
+    , source_h = 0;
 
   cairo_surface_t *surface;
 
-  Local<Object> obj = info[0]->ToObject();
+  Napi::Object obj = info[0].As<Napi::Object>();
 
   // Image
-  if (Nan::New(Image::constructor)->HasInstance(obj)) {
-    Image *img = Nan::ObjectWrap::Unwrap<Image>(obj);
+  if (obj.InstanceOf(env.GetInstanceData<InstanceData>()->ImageCtor.Value()).UnwrapOr(false)) {
+    Image *img = Image::Unwrap(obj);
     if (!img->isComplete()) {
-      return Nan::ThrowError("Image given has not completed loading");
+      Napi::Error::New(env, "Image given has not completed loading").ThrowAsJavaScriptException();
+      return;
     }
-    sw = img->width;
-    sh = img->height;
+    source_w = sw = img->width;
+    source_h = sh = img->height;
     surface = img->surface();
 
   // Canvas
-  } else if (Nan::New(Canvas::constructor)->HasInstance(obj)) {
-    Canvas *canvas = Nan::ObjectWrap::Unwrap<Canvas>(obj);
-    sw = canvas->width;
-    sh = canvas->height;
+  } else if (obj.InstanceOf(env.GetInstanceData<InstanceData>()->CanvasCtor.Value()).UnwrapOr(false)) {
+    Canvas *canvas = Canvas::Unwrap(obj);
+    source_w = sw = canvas->getWidth();
+    source_h = sh = canvas->getHeight();
     surface = canvas->surface();
 
   // Invalid
   } else {
-    return Nan::ThrowTypeError("Image or Canvas expected");
+    if (!env.IsExceptionPending()) {
+      Napi::TypeError::New(env, "Image or Canvas expected").ThrowAsJavaScriptException();
+    }
+    return;
   }
 
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  cairo_t *ctx = context->context();
+  cairo_t *ctx = context();
 
   // Arguments
-  switch (info.Length()) {
+  switch (infoLen) {
     // img, sx, sy, sw, sh, dx, dy, dw, dh
     case 9:
-      sx = info[1]->NumberValue();
-      sy = info[2]->NumberValue();
-      sw = info[3]->NumberValue();
-      sh = info[4]->NumberValue();
-      dx = info[5]->NumberValue();
-      dy = info[6]->NumberValue();
-      dw = info[7]->NumberValue();
-      dh = info[8]->NumberValue();
+      sx = args[0];
+      sy = args[1];
+      sw = args[2];
+      sh = args[3];
+      dx = args[4];
+      dy = args[5];
+      dw = args[6];
+      dh = args[7];
       break;
     // img, dx, dy, dw, dh
     case 5:
-      dx = info[1]->NumberValue();
-      dy = info[2]->NumberValue();
-      dw = info[3]->NumberValue();
-      dh = info[4]->NumberValue();
+      dx = args[0];
+      dy = args[1];
+      dw = args[2];
+      dh = args[3];
       break;
     // img, dx, dy
     case 3:
-      dx = info[1]->NumberValue();
-      dy = info[2]->NumberValue();
+      dx = args[0];
+      dy = args[1];
       dw = sw;
       dh = sh;
       break;
-    default:
-      return Nan::ThrowTypeError("invalid arguments");
   }
+
+  if (!(sw && sh && dw && dh))
+    return;
 
   // Start draw
   cairo_save(ctx);
 
-  // Scale src
-  float fx = (float) dw / sw;
-  float fy = (float) dh / sh;
+  cairo_matrix_t matrix;
+  double transforms[6];
+  cairo_get_matrix(ctx, &matrix);
+  decompose_matrix(matrix, transforms);
+  // extract the scale value from the current transform so that we know how many pixels we
+  // need for our extra canvas in the drawImage operation.
+  double current_scale_x = std::abs(transforms[1]);
+  double current_scale_y = std::abs(transforms[2]);
+  double extra_dx = 0;
+  double extra_dy = 0;
+  double fx = dw / sw * current_scale_x; // transforms[1] is scale on X
+  double fy = dh / sh * current_scale_y; // transforms[2] is scale on X
+  bool needScale = dw != sw || dh != sh;
+  bool needCut = sw != source_w || sh != source_h || sx < 0 || sy < 0;
+  bool sameCanvas = surface == canvas()->surface();
+  bool needsExtraSurface = sameCanvas || needCut || needScale;
+  cairo_surface_t *surfTemp = NULL;
+  cairo_t *ctxTemp = NULL;
 
-  if (dw != sw || dh != sh) {
-    cairo_scale(ctx, fx, fy);
-    dx /= fx;
-    dy /= fy;
-    dw /= fx;
-    dh /= fy;
+  if (needsExtraSurface) {
+    // we want to create the extra surface as small as possible.
+    // fx and fy are the total scaling we need to apply to sw, sh.
+    // from sw and sh we want to remove the part that is outside the source_w and soruce_h
+    double real_w = sw;
+    double real_h = sh;
+    double translate_x = 0;
+    double translate_y = 0;
+    // if sx or sy are negative, a part of the area represented by sw and sh is empty
+    // because there are empty pixels, so we cut it out.
+    // On the other hand if sx or sy are positive, but sw and sh extend outside the real
+    // source pixels, we cut the area in that case too.
+    if (sx < 0) {
+      extra_dx = -sx * fx;
+      real_w = sw + sx;
+    } else if (sx + sw > source_w) {
+      real_w = sw - (sx + sw - source_w);
+    }
+    if (sy < 0) {
+      extra_dy = -sy * fy;
+      real_h = sh + sy;
+    } else if (sy + sh > source_h) {
+      real_h = sh - (sy + sh - source_h);
+    }
+    // if after cutting we are still bigger than source pixels, we restrict again
+    if (real_w > source_w) {
+      real_w = source_w;
+    }
+    if (real_h > source_h) {
+      real_h = source_h;
+    }
+    // TODO: find a way to limit the surfTemp to real_w and real_h if fx and fy are bigger than 1.
+    // there are no more pixel than the one available in the source, no need to create a bigger surface.
+    surfTemp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, round(real_w * fx), round(real_h * fy));
+    ctxTemp = cairo_create(surfTemp);
+    cairo_scale(ctxTemp, fx, fy);
+    if (sx > 0) {
+      translate_x = sx;
+    }
+    if (sy > 0) {
+      translate_y = sy;
+    }
+    cairo_set_source_surface(ctxTemp, surface, -translate_x, -translate_y);
+    cairo_pattern_set_filter(cairo_get_source(ctxTemp), state->imageSmoothingEnabled ? state->patternQuality : CAIRO_FILTER_NEAREST);
+    cairo_pattern_set_extend(cairo_get_source(ctxTemp), CAIRO_EXTEND_REFLECT);
+    cairo_paint_with_alpha(ctxTemp, 1);
+    surface = surfTemp;
   }
-
   // apply shadow if there is one
-  if (context->hasShadow()) {
-    if(context->state->shadowBlur) {
+  if (hasShadow()) {
+    if(state->shadowBlur) {
       // we need to create a new surface in order to blur
-      int pad = context->state->shadowBlur * 2;
+      int pad = state->shadowBlur * 2;
       cairo_surface_t *shadow_surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, dw + 2 * pad, dh + 2 * pad);
       cairo_t *shadow_context = cairo_create(shadow_surface);
 
       // mask and blur
-      context->setSourceRGBA(shadow_context, context->state->shadow);
+      setSourceRGBA(shadow_context, state->shadow);
       cairo_mask_surface(shadow_context, surface, pad, pad);
-      context->blur(shadow_surface, context->state->shadowBlur);
+      blur(shadow_surface, state->shadowBlur);
 
       // paint
       // @note: ShadowBlur looks different in each browser. This implementation matches chrome as close as possible.
@@ -862,52 +1425,62 @@ NAN_METHOD(Context2d::DrawImage) {
       //        implementation, and its not immediately clear why an offset is necessary, but without it, the result
       //        in chrome is different.
       cairo_set_source_surface(ctx, shadow_surface,
-        dx - sx + (context->state->shadowOffsetX / fx) - pad + 1.4,
-        dy - sy + (context->state->shadowOffsetY / fy) - pad + 1.4);
+        dx + state->shadowOffsetX - pad + 1.4,
+        dy + state->shadowOffsetY - pad + 1.4);
       cairo_paint(ctx);
-
       // cleanup
       cairo_destroy(shadow_context);
       cairo_surface_destroy(shadow_surface);
     } else {
-      context->setSourceRGBA(context->state->shadow);
+      setSourceRGBA(state->shadow);
       cairo_mask_surface(ctx, surface,
-        dx - sx + (context->state->shadowOffsetX / fx),
-        dy - sy + (context->state->shadowOffsetY / fy));
+        dx + (state->shadowOffsetX),
+        dy + (state->shadowOffsetY));
     }
   }
 
-  context->savePath();
-  cairo_rectangle(ctx, dx, dy, dw, dh);
-  cairo_clip(ctx);
-  context->restorePath();
+  double scaled_dx = dx;
+  double scaled_dy = dy;
 
+  if (needsExtraSurface && (current_scale_x != 1 || current_scale_y != 1)) {
+    // in this case our surface contains already current_scale_x, we need to scale back
+    cairo_scale(ctx, 1 / current_scale_x, 1 / current_scale_y);
+    scaled_dx *= current_scale_x;
+    scaled_dy *= current_scale_y;
+  }
   // Paint
-  cairo_set_source_surface(ctx, surface, dx - sx, dy - sy);
-  cairo_pattern_set_filter(cairo_get_source(ctx), context->state->patternQuality);
-  cairo_paint_with_alpha(ctx, context->state->globalAlpha);
+  cairo_set_source_surface(ctx, surface, scaled_dx + extra_dx, scaled_dy + extra_dy);
+  cairo_pattern_set_filter(cairo_get_source(ctx), state->imageSmoothingEnabled ? state->patternQuality : CAIRO_FILTER_NEAREST);
+  cairo_pattern_set_extend(cairo_get_source(ctx), CAIRO_EXTEND_NONE);
+  cairo_paint_with_alpha(ctx, state->globalAlpha);
 
   cairo_restore(ctx);
+
+  if (needsExtraSurface) {
+    cairo_destroy(ctxTemp);
+    cairo_surface_destroy(surfTemp);
+  }
 }
 
 /*
  * Get global alpha.
  */
 
-NAN_GETTER(Context2d::GetGlobalAlpha) {
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  info.GetReturnValue().Set(Nan::New<Number>(context->state->globalAlpha));
+Napi::Value
+Context2d::GetGlobalAlpha(const Napi::CallbackInfo& info) {
+  return Napi::Number::New(env, state->globalAlpha);
 }
 
 /*
  * Set global alpha.
  */
 
-NAN_SETTER(Context2d::SetGlobalAlpha) {
-  double n = value->NumberValue();
-  if (n >= 0 && n <= 1) {
-    Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-    context->state->globalAlpha = n;
+void
+Context2d::SetGlobalAlpha(const Napi::CallbackInfo& info, const Napi::Value& value) {
+  Napi::Maybe<Napi::Number> numberValue = value.ToNumber();
+  if (numberValue.IsJust()) {
+    double n = numberValue.Unwrap().DoubleValue();
+    if (n >= 0 && n <= 1) state->globalAlpha = n;
   }
 }
 
@@ -915,69 +1488,72 @@ NAN_SETTER(Context2d::SetGlobalAlpha) {
  * Get global composite operation.
  */
 
-NAN_GETTER(Context2d::GetGlobalCompositeOperation) {
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  cairo_t *ctx = context->context();
+Napi::Value
+Context2d::GetGlobalCompositeOperation(const Napi::CallbackInfo& info) {
+  cairo_t *ctx = context();
 
-  const char *op = "source-over";
+  const char *op{};
   switch (cairo_get_operator(ctx)) {
-    case CAIRO_OPERATOR_ATOP: op = "source-atop"; break;
-    case CAIRO_OPERATOR_IN: op = "source-in"; break;
-    case CAIRO_OPERATOR_OUT: op = "source-out"; break;
-    case CAIRO_OPERATOR_XOR: op = "xor"; break;
-    case CAIRO_OPERATOR_DEST_ATOP: op = "destination-atop"; break;
-    case CAIRO_OPERATOR_DEST_IN: op = "destination-in"; break;
-    case CAIRO_OPERATOR_DEST_OUT: op = "destination-out"; break;
-    case CAIRO_OPERATOR_DEST_OVER: op = "destination-over"; break;
+    // composite modes:
     case CAIRO_OPERATOR_CLEAR: op = "clear"; break;
-    case CAIRO_OPERATOR_SOURCE: op = "source"; break;
-    case CAIRO_OPERATOR_DEST: op = "dest"; break;
-    case CAIRO_OPERATOR_OVER: op = "over"; break;
-    case CAIRO_OPERATOR_SATURATE: op = "saturate"; break;
-    // Non-standard
-    // supported by resent versions of cairo
-#if CAIRO_VERSION_MINOR >= 10
-    case CAIRO_OPERATOR_LIGHTEN: op = "lighten"; break;
-    case CAIRO_OPERATOR_ADD: op = "add"; break;
-    case CAIRO_OPERATOR_DARKEN: op = "darker"; break;
+    case CAIRO_OPERATOR_SOURCE: op = "copy"; break;
+    case CAIRO_OPERATOR_DEST: op = "destination"; break;
+    case CAIRO_OPERATOR_OVER: op = "source-over"; break;
+    case CAIRO_OPERATOR_DEST_OVER: op = "destination-over"; break;
+    case CAIRO_OPERATOR_IN: op = "source-in"; break;
+    case CAIRO_OPERATOR_DEST_IN: op = "destination-in"; break;
+    case CAIRO_OPERATOR_OUT: op = "source-out"; break;
+    case CAIRO_OPERATOR_DEST_OUT: op = "destination-out"; break;
+    case CAIRO_OPERATOR_ATOP: op = "source-atop"; break;
+    case CAIRO_OPERATOR_DEST_ATOP: op = "destination-atop"; break;
+    case CAIRO_OPERATOR_XOR: op = "xor"; break;
+    case CAIRO_OPERATOR_ADD: op = "lighter"; break;
+    // blend modes:
+    // Note: "source-over" and "normal" are synonyms. Chrome and FF both report
+    // "source-over" after setting gCO to "normal".
+    // case CAIRO_OPERATOR_OVER: op = "normal";
     case CAIRO_OPERATOR_MULTIPLY: op = "multiply"; break;
     case CAIRO_OPERATOR_SCREEN: op = "screen"; break;
     case CAIRO_OPERATOR_OVERLAY: op = "overlay"; break;
-    case CAIRO_OPERATOR_HARD_LIGHT: op = "hard-light"; break;
-    case CAIRO_OPERATOR_SOFT_LIGHT: op = "soft-light"; break;
-    case CAIRO_OPERATOR_HSL_HUE: op = "hsl-hue"; break;
-    case CAIRO_OPERATOR_HSL_SATURATION: op = "hsl-saturation"; break;
-    case CAIRO_OPERATOR_HSL_COLOR: op = "hsl-color"; break;
-    case CAIRO_OPERATOR_HSL_LUMINOSITY: op = "hsl-luminosity"; break;
+    case CAIRO_OPERATOR_DARKEN: op = "darken"; break;
+    case CAIRO_OPERATOR_LIGHTEN: op = "lighten"; break;
     case CAIRO_OPERATOR_COLOR_DODGE: op = "color-dodge"; break;
     case CAIRO_OPERATOR_COLOR_BURN: op = "color-burn"; break;
+    case CAIRO_OPERATOR_HARD_LIGHT: op = "hard-light"; break;
+    case CAIRO_OPERATOR_SOFT_LIGHT: op = "soft-light"; break;
     case CAIRO_OPERATOR_DIFFERENCE: op = "difference"; break;
     case CAIRO_OPERATOR_EXCLUSION: op = "exclusion"; break;
-#else
-    case CAIRO_OPERATOR_ADD: op = "lighter"; break;
-#endif
+    case CAIRO_OPERATOR_HSL_HUE: op = "hue"; break;
+    case CAIRO_OPERATOR_HSL_SATURATION: op = "saturation"; break;
+    case CAIRO_OPERATOR_HSL_COLOR: op = "color"; break;
+    case CAIRO_OPERATOR_HSL_LUMINOSITY: op = "luminosity"; break;
+    // non-standard:
+    case CAIRO_OPERATOR_SATURATE: op = "saturate"; break;
+    default: op = "source-over";
   }
 
-  info.GetReturnValue().Set(Nan::New(op).ToLocalChecked());
+  return Napi::String::New(env, op);
 }
 
 /*
  * Set pattern quality.
  */
 
-NAN_SETTER(Context2d::SetPatternQuality) {
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  String::Utf8Value quality(value->ToString());
-  if (0 == strcmp("fast", *quality)) {
-    context->state->patternQuality = CAIRO_FILTER_FAST;
-  } else if (0 == strcmp("good", *quality)) {
-    context->state->patternQuality = CAIRO_FILTER_GOOD;
-  } else if (0 == strcmp("best", *quality)) {
-    context->state->patternQuality = CAIRO_FILTER_BEST;
-  } else if (0 == strcmp("nearest", *quality)) {
-    context->state->patternQuality = CAIRO_FILTER_NEAREST;
-  } else if (0 == strcmp("bilinear", *quality)) {
-    context->state->patternQuality = CAIRO_FILTER_BILINEAR;
+void
+Context2d::SetPatternQuality(const Napi::CallbackInfo& info, const Napi::Value& value) {
+  if (value.IsString()) {
+    std::string quality = value.As<Napi::String>().Utf8Value();
+    if (quality == "fast") {
+      state->patternQuality = CAIRO_FILTER_FAST;
+    } else if (quality == "good") {
+      state->patternQuality = CAIRO_FILTER_GOOD;
+    } else if (quality == "best") {
+      state->patternQuality = CAIRO_FILTER_BEST;
+    } else if (quality == "nearest") {
+      state->patternQuality = CAIRO_FILTER_NEAREST;
+    } else if (quality == "bilinear") {
+      state->patternQuality = CAIRO_FILTER_BILINEAR;
+    }
   }
 }
 
@@ -985,93 +1561,84 @@ NAN_SETTER(Context2d::SetPatternQuality) {
  * Get pattern quality.
  */
 
-NAN_GETTER(Context2d::GetPatternQuality) {
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
+Napi::Value
+Context2d::GetPatternQuality(const Napi::CallbackInfo& info) {
   const char *quality;
-  switch (context->state->patternQuality) {
+  switch (state->patternQuality) {
     case CAIRO_FILTER_FAST: quality = "fast"; break;
     case CAIRO_FILTER_BEST: quality = "best"; break;
     case CAIRO_FILTER_NEAREST: quality = "nearest"; break;
     case CAIRO_FILTER_BILINEAR: quality = "bilinear"; break;
     default: quality = "good";
   }
-  info.GetReturnValue().Set(Nan::New(quality).ToLocalChecked());
+  return Napi::String::New(env, quality);
+}
+
+/*
+ * Set ImageSmoothingEnabled value.
+ */
+
+void
+Context2d::SetImageSmoothingEnabled(const Napi::CallbackInfo& info, const Napi::Value& value) {
+  Napi::Boolean boolValue;
+  if (value.ToBoolean().UnwrapTo(&boolValue)) state->imageSmoothingEnabled = boolValue.Value();
+}
+
+/*
+ * Get pattern quality.
+ */
+
+Napi::Value
+Context2d::GetImageSmoothingEnabled(const Napi::CallbackInfo& info) {
+  return Napi::Boolean::New(env, state->imageSmoothingEnabled);
 }
 
 /*
  * Set global composite operation.
  */
 
-NAN_SETTER(Context2d::SetGlobalCompositeOperation) {
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  cairo_t *ctx = context->context();
-  String::Utf8Value type(value->ToString());
-  if (0 == strcmp("xor", *type)) {
-    cairo_set_operator(ctx, CAIRO_OPERATOR_XOR);
-  } else if (0 == strcmp("source-atop", *type)) {
-    cairo_set_operator(ctx, CAIRO_OPERATOR_ATOP);
-  } else if (0 == strcmp("source-in", *type)) {
-    cairo_set_operator(ctx, CAIRO_OPERATOR_IN);
-  } else if (0 == strcmp("source-out", *type)) {
-    cairo_set_operator(ctx, CAIRO_OPERATOR_OUT);
-  } else if (0 == strcmp("destination-atop", *type)) {
-    cairo_set_operator(ctx, CAIRO_OPERATOR_DEST_ATOP);
-  } else if (0 == strcmp("destination-in", *type)) {
-    cairo_set_operator(ctx, CAIRO_OPERATOR_DEST_IN);
-  } else if (0 == strcmp("destination-out", *type)) {
-    cairo_set_operator(ctx, CAIRO_OPERATOR_DEST_OUT);
-  } else if (0 == strcmp("destination-over", *type)) {
-    cairo_set_operator(ctx, CAIRO_OPERATOR_DEST_OVER);
-  } else if (0 == strcmp("clear", *type)) {
-    cairo_set_operator(ctx, CAIRO_OPERATOR_CLEAR);
-  } else if (0 == strcmp("source", *type)) {
-    cairo_set_operator(ctx, CAIRO_OPERATOR_SOURCE);
-  } else if (0 == strcmp("dest", *type)) {
-    cairo_set_operator(ctx, CAIRO_OPERATOR_DEST);
-  } else if (0 == strcmp("saturate", *type)) {
-    cairo_set_operator(ctx, CAIRO_OPERATOR_SATURATE);
-  } else if (0 == strcmp("over", *type)) {
-    cairo_set_operator(ctx, CAIRO_OPERATOR_OVER);
-  // Non-standard
-  // supported by resent versions of cairo
-#if CAIRO_VERSION_MINOR >= 10
-  } else if (0 == strcmp("add", *type)) {
-    cairo_set_operator(ctx, CAIRO_OPERATOR_ADD);
-  } else if (0 == strcmp("lighten", *type)) {
-    cairo_set_operator(ctx, CAIRO_OPERATOR_LIGHTEN);
-  } else if (0 == strcmp("darker", *type)) {
-    cairo_set_operator(ctx, CAIRO_OPERATOR_DARKEN);
-  } else if (0 == strcmp("multiply", *type)) {
-    cairo_set_operator(ctx, CAIRO_OPERATOR_MULTIPLY);
-  } else if (0 == strcmp("screen", *type)) {
-    cairo_set_operator(ctx, CAIRO_OPERATOR_SCREEN);
-  } else if (0 == strcmp("overlay", *type)) {
-    cairo_set_operator(ctx, CAIRO_OPERATOR_OVERLAY);
-  } else if (0 == strcmp("hard-light", *type)) {
-    cairo_set_operator(ctx, CAIRO_OPERATOR_HARD_LIGHT);
-  } else if (0 == strcmp("soft-light", *type)) {
-    cairo_set_operator(ctx, CAIRO_OPERATOR_SOFT_LIGHT);
-  } else if (0 == strcmp("hsl-hue", *type)) {
-    cairo_set_operator(ctx, CAIRO_OPERATOR_HSL_HUE);
-  } else if (0 == strcmp("hsl-saturation", *type)) {
-    cairo_set_operator(ctx, CAIRO_OPERATOR_HSL_SATURATION);
-  } else if (0 == strcmp("hsl-color", *type)) {
-    cairo_set_operator(ctx, CAIRO_OPERATOR_HSL_COLOR);
-  } else if (0 == strcmp("hsl-luminosity", *type)) {
-    cairo_set_operator(ctx, CAIRO_OPERATOR_HSL_LUMINOSITY);
-  } else if (0 == strcmp("color-dodge", *type)) {
-    cairo_set_operator(ctx, CAIRO_OPERATOR_COLOR_DODGE);
-  } else if (0 == strcmp("color-burn", *type)) {
-    cairo_set_operator(ctx, CAIRO_OPERATOR_COLOR_BURN);
-  } else if (0 == strcmp("difference", *type)) {
-    cairo_set_operator(ctx, CAIRO_OPERATOR_DIFFERENCE);
-  } else if (0 == strcmp("exclusion", *type)) {
-    cairo_set_operator(ctx, CAIRO_OPERATOR_EXCLUSION);
-#endif
-  } else if (0 == strcmp("lighter", *type)) {
-    cairo_set_operator(ctx, CAIRO_OPERATOR_ADD);
-  } else {
-    cairo_set_operator(ctx, CAIRO_OPERATOR_OVER);
+void
+Context2d::SetGlobalCompositeOperation(const Napi::CallbackInfo& info, const Napi::Value& value) {
+  cairo_t *ctx = this->context();
+  Napi::String opStr;
+  if (value.ToString().UnwrapTo(&opStr)) { // Unlike CSS colors, this *is* case-sensitive
+    const std::map<std::string, cairo_operator_t> blendmodes = {
+      // composite modes:
+      {"clear", CAIRO_OPERATOR_CLEAR},
+      {"copy", CAIRO_OPERATOR_SOURCE},
+      {"destination", CAIRO_OPERATOR_DEST}, // this seems to have been omitted from the spec
+      {"source-over", CAIRO_OPERATOR_OVER},
+      {"destination-over", CAIRO_OPERATOR_DEST_OVER},
+      {"source-in", CAIRO_OPERATOR_IN},
+      {"destination-in", CAIRO_OPERATOR_DEST_IN},
+      {"source-out", CAIRO_OPERATOR_OUT},
+      {"destination-out", CAIRO_OPERATOR_DEST_OUT},
+      {"source-atop", CAIRO_OPERATOR_ATOP},
+      {"destination-atop", CAIRO_OPERATOR_DEST_ATOP},
+      {"xor", CAIRO_OPERATOR_XOR},
+      {"lighter", CAIRO_OPERATOR_ADD},
+      // blend modes:
+      {"normal", CAIRO_OPERATOR_OVER},
+      {"multiply", CAIRO_OPERATOR_MULTIPLY},
+      {"screen", CAIRO_OPERATOR_SCREEN},
+      {"overlay", CAIRO_OPERATOR_OVERLAY},
+      {"darken", CAIRO_OPERATOR_DARKEN},
+      {"lighten", CAIRO_OPERATOR_LIGHTEN},
+      {"color-dodge", CAIRO_OPERATOR_COLOR_DODGE},
+      {"color-burn", CAIRO_OPERATOR_COLOR_BURN},
+      {"hard-light", CAIRO_OPERATOR_HARD_LIGHT},
+      {"soft-light", CAIRO_OPERATOR_SOFT_LIGHT},
+      {"difference", CAIRO_OPERATOR_DIFFERENCE},
+      {"exclusion", CAIRO_OPERATOR_EXCLUSION},
+      {"hue", CAIRO_OPERATOR_HSL_HUE},
+      {"saturation", CAIRO_OPERATOR_HSL_SATURATION},
+      {"color", CAIRO_OPERATOR_HSL_COLOR},
+      {"luminosity", CAIRO_OPERATOR_HSL_LUMINOSITY},
+      // non-standard:
+      {"saturate", CAIRO_OPERATOR_SATURATE}
+    };
+    auto op = blendmodes.find(opStr.Utf8Value());
+    if (op != blendmodes.end()) cairo_set_operator(ctx, op->second);
   }
 }
 
@@ -1079,56 +1646,61 @@ NAN_SETTER(Context2d::SetGlobalCompositeOperation) {
  * Get shadow offset x.
  */
 
-NAN_GETTER(Context2d::GetShadowOffsetX) {
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  info.GetReturnValue().Set(Nan::New<Number>(context->state->shadowOffsetX));
+Napi::Value
+Context2d::GetShadowOffsetX(const Napi::CallbackInfo& info) {
+  return Napi::Number::New(env, state->shadowOffsetX);
 }
 
 /*
  * Set shadow offset x.
  */
 
-NAN_SETTER(Context2d::SetShadowOffsetX) {
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  context->state->shadowOffsetX = value->NumberValue();
+void
+Context2d::SetShadowOffsetX(const Napi::CallbackInfo& info, const Napi::Value& value) {
+  Napi::Number numberValue;
+  if (value.ToNumber().UnwrapTo(&numberValue)) state->shadowOffsetX = numberValue.DoubleValue();
 }
 
 /*
  * Get shadow offset y.
  */
 
-NAN_GETTER(Context2d::GetShadowOffsetY) {
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  info.GetReturnValue().Set(Nan::New<Number>(context->state->shadowOffsetY));
+Napi::Value
+Context2d::GetShadowOffsetY(const Napi::CallbackInfo& info) {
+  return Napi::Number::New(env, state->shadowOffsetY);
 }
 
 /*
  * Set shadow offset y.
  */
 
-NAN_SETTER(Context2d::SetShadowOffsetY) {
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  context->state->shadowOffsetY = value->NumberValue();
+void
+Context2d::SetShadowOffsetY(const Napi::CallbackInfo& info, const Napi::Value& value) {
+  Napi::Number numberValue;
+  if (value.ToNumber().UnwrapTo(&numberValue)) state->shadowOffsetY = numberValue.DoubleValue();
 }
 
 /*
  * Get shadow blur.
  */
 
-NAN_GETTER(Context2d::GetShadowBlur) {
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  info.GetReturnValue().Set(Nan::New<Number>(context->state->shadowBlur));
+Napi::Value
+Context2d::GetShadowBlur(const Napi::CallbackInfo& info) {
+  return Napi::Number::New(env, state->shadowBlur);
 }
 
 /*
  * Set shadow blur.
  */
 
-NAN_SETTER(Context2d::SetShadowBlur) {
-  int n = value->NumberValue();
-  if (n >= 0) {
-    Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-    context->state->shadowBlur = n;
+void
+Context2d::SetShadowBlur(const Napi::CallbackInfo& info, const Napi::Value& value) {
+  Napi::Number n;
+  if (value.ToNumber().UnwrapTo(&n)) {
+    double v = n.DoubleValue();
+    if (v >= 0 && v <= std::numeric_limits<decltype(state->shadowBlur)>::max()) {
+      state->shadowBlur = v;
+    }
   }
 }
 
@@ -1136,69 +1708,76 @@ NAN_SETTER(Context2d::SetShadowBlur) {
  * Get current antialiasing setting.
  */
 
-NAN_GETTER(Context2d::GetAntiAlias) {
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
+Napi::Value
+Context2d::GetAntiAlias(const Napi::CallbackInfo& info) {
   const char *aa;
-  switch (cairo_get_antialias(context->context())) {
+  switch (cairo_get_antialias(context())) {
     case CAIRO_ANTIALIAS_NONE: aa = "none"; break;
     case CAIRO_ANTIALIAS_GRAY: aa = "gray"; break;
     case CAIRO_ANTIALIAS_SUBPIXEL: aa = "subpixel"; break;
     default: aa = "default";
   }
-  info.GetReturnValue().Set(Nan::New(aa).ToLocalChecked());
+  return Napi::String::New(env, aa);
 }
 
 /*
  * Set antialiasing.
  */
 
-NAN_SETTER(Context2d::SetAntiAlias) {
-  String::Utf8Value str(value->ToString());
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  cairo_t *ctx = context->context();
-  cairo_antialias_t a;
-  if (0 == strcmp("none", *str)) {
-    a = CAIRO_ANTIALIAS_NONE;
-  } else if (0 == strcmp("default", *str)) {
-    a = CAIRO_ANTIALIAS_DEFAULT;
-  } else if (0 == strcmp("gray", *str)) {
-    a = CAIRO_ANTIALIAS_GRAY;
-  } else if (0 == strcmp("subpixel", *str)) {
-    a = CAIRO_ANTIALIAS_SUBPIXEL;
-  } else {
-    a = cairo_get_antialias(ctx);
+void
+Context2d::SetAntiAlias(const Napi::CallbackInfo& info, const Napi::Value& value) {
+  Napi::String stringValue;
+
+  if (value.ToString().UnwrapTo(&stringValue)) {
+    std::string str = stringValue.Utf8Value();
+    cairo_t *ctx = context();
+    cairo_antialias_t a;
+    if (str == "none") {
+      a = CAIRO_ANTIALIAS_NONE;
+    } else if (str == "default") {
+      a = CAIRO_ANTIALIAS_DEFAULT;
+    } else if (str == "gray") {
+      a = CAIRO_ANTIALIAS_GRAY;
+    } else if (str == "subpixel") {
+      a = CAIRO_ANTIALIAS_SUBPIXEL;
+    } else {
+      a = cairo_get_antialias(ctx);
+    }
+    cairo_set_antialias(ctx, a);
   }
-  cairo_set_antialias(ctx, a);
 }
 
 /*
  * Get text drawing mode.
  */
 
-NAN_GETTER(Context2d::GetTextDrawingMode) {
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
+Napi::Value
+Context2d::GetTextDrawingMode(const Napi::CallbackInfo& info) {
   const char *mode;
-  if (context->state->textDrawingMode == TEXT_DRAW_PATHS) {
+  if (state->textDrawingMode == TEXT_DRAW_PATHS) {
     mode = "path";
-  } else if (context->state->textDrawingMode == TEXT_DRAW_GLYPHS) {
+  } else if (state->textDrawingMode == TEXT_DRAW_GLYPHS) {
     mode = "glyph";
   } else {
     mode = "unknown";
   }
-  info.GetReturnValue().Set(Nan::New(mode).ToLocalChecked());
+  return Napi::String::New(env, mode);
 }
 
 /*
  * Set text drawing mode.
  */
 
-NAN_SETTER(Context2d::SetTextDrawingMode) {
-  String::Utf8Value str(value->ToString());
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  if (0 == strcmp("path", *str)) {
-    context->state->textDrawingMode = TEXT_DRAW_PATHS;
-  } else if (0 == strcmp("glyph", *str)) {
-    context->state->textDrawingMode = TEXT_DRAW_GLYPHS;
+void
+Context2d::SetTextDrawingMode(const Napi::CallbackInfo& info, const Napi::Value& value) {
+  Napi::String stringValue;
+  if (value.ToString().UnwrapTo(&stringValue)) {
+    std::string str = stringValue.Utf8Value();
+    if (str == "path") {
+      state->textDrawingMode = TEXT_DRAW_PATHS;
+    } else if (str == "glyph") {
+      state->textDrawingMode = TEXT_DRAW_GLYPHS;
+    }
   }
 }
 
@@ -1206,59 +1785,212 @@ NAN_SETTER(Context2d::SetTextDrawingMode) {
  * Get filter.
  */
 
-NAN_GETTER(Context2d::GetFilter) {
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
+Napi::Value
+Context2d::GetQuality(const Napi::CallbackInfo& info) {
   const char *filter;
-  switch (cairo_pattern_get_filter(cairo_get_source(context->context()))) {
+  switch (cairo_pattern_get_filter(cairo_get_source(context()))) {
     case CAIRO_FILTER_FAST: filter = "fast"; break;
     case CAIRO_FILTER_BEST: filter = "best"; break;
     case CAIRO_FILTER_NEAREST: filter = "nearest"; break;
     case CAIRO_FILTER_BILINEAR: filter = "bilinear"; break;
     default: filter = "good";
   }
-  info.GetReturnValue().Set(Nan::New(filter).ToLocalChecked());
+  return Napi::String::New(env, filter);
 }
 
 /*
  * Set filter.
  */
 
-NAN_SETTER(Context2d::SetFilter) {
-  String::Utf8Value str(value->ToString());
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  cairo_filter_t filter;
-  if (0 == strcmp("fast", *str)) {
-    filter = CAIRO_FILTER_FAST;
-  } else if (0 == strcmp("best", *str)) {
-    filter = CAIRO_FILTER_BEST;
-  } else if (0 == strcmp("nearest", *str)) {
-    filter = CAIRO_FILTER_NEAREST;
-  } else if (0 == strcmp("bilinear", *str)) {
-    filter = CAIRO_FILTER_BILINEAR;
-  } else {
-    filter = CAIRO_FILTER_GOOD;
+void
+Context2d::SetQuality(const Napi::CallbackInfo& info, const Napi::Value& value) {
+  Napi::String stringValue;
+  if (value.ToString().UnwrapTo(&stringValue)) {
+    std::string str = stringValue.Utf8Value();
+    cairo_filter_t filter;
+    if (str == "fast") {
+      filter = CAIRO_FILTER_FAST;
+    } else if (str == "best") {
+      filter = CAIRO_FILTER_BEST;
+    } else if (str == "nearest") {
+      filter = CAIRO_FILTER_NEAREST;
+    } else if (str == "bilinear") {
+      filter = CAIRO_FILTER_BILINEAR;
+    } else {
+      filter = CAIRO_FILTER_GOOD;
+    }
+    cairo_pattern_set_filter(cairo_get_source(context()), filter);
   }
-  cairo_pattern_set_filter(cairo_get_source(context->context()), filter);
+}
+
+/*
+ * Helper for get current transform matrix
+ */
+
+Napi::Value
+Context2d::get_current_transform() {
+  Napi::Float64Array arr = Napi::Float64Array::New(env, 6);
+  double *dest = arr.Data();
+  cairo_matrix_t matrix;
+  cairo_get_matrix(context(), &matrix);
+  dest[0] = matrix.xx;
+  dest[1] = matrix.yx;
+  dest[2] = matrix.xy;
+  dest[3] = matrix.yy;
+  dest[4] = matrix.x0;
+  dest[5] = matrix.y0;
+  Napi::Maybe<Napi::Object> ret = env.GetInstanceData<InstanceData>()->DOMMatrixCtor.Value().New({ arr });
+  return ret.IsJust() ? ret.Unwrap() : env.Undefined();
+}
+
+/*
+ * Helper for get/set transform.
+ */
+
+void parse_matrix_from_object(cairo_matrix_t &matrix, Napi::Object mat) {
+  Napi::Value zero = Napi::Number::New(mat.Env(), 0);
+  cairo_matrix_init(&matrix,
+    mat.Get("a").UnwrapOr(zero).As<Napi::Number>().DoubleValue(),
+    mat.Get("b").UnwrapOr(zero).As<Napi::Number>().DoubleValue(),
+    mat.Get("c").UnwrapOr(zero).As<Napi::Number>().DoubleValue(),
+    mat.Get("d").UnwrapOr(zero).As<Napi::Number>().DoubleValue(),
+    mat.Get("e").UnwrapOr(zero).As<Napi::Number>().DoubleValue(),
+    mat.Get("f").UnwrapOr(zero).As<Napi::Number>().DoubleValue()
+  );
+}
+
+
+/*
+ * Get current transform.
+ */
+
+Napi::Value
+Context2d::GetCurrentTransform(const Napi::CallbackInfo& info) {
+  return get_current_transform();
+}
+
+/*
+ * Set current transform.
+ */
+
+void
+Context2d::SetCurrentTransform(const Napi::CallbackInfo& info, const Napi::Value& value) {
+  Napi::Object mat;
+
+  if (value.ToObject().UnwrapTo(&mat)) {
+    if (!mat.InstanceOf(env.GetInstanceData<InstanceData>()->DOMMatrixCtor.Value()).UnwrapOr(false)) {
+      if (!env.IsExceptionPending()) {
+        Napi::TypeError::New(env, "Expected DOMMatrix").ThrowAsJavaScriptException();
+      }
+      return;
+    }
+
+    cairo_matrix_t matrix;
+    parse_matrix_from_object(matrix, mat);
+
+    cairo_transform(context(), &matrix);
+  }
+}
+
+/*
+ * Get current fill style.
+ */
+
+Napi::Value
+Context2d::GetFillStyle(const Napi::CallbackInfo& info) {
+  Napi::Value style;
+
+  if (_fillStyle.IsEmpty())
+    style = _getFillColor();
+  else
+    style = _fillStyle.Value();
+
+  return style;
+}
+
+/*
+ * Set current fill style.
+ */
+
+void
+Context2d::SetFillStyle(const Napi::CallbackInfo& info, const Napi::Value& value) {
+  if (value.IsString()) {
+    _fillStyle.Reset();
+    _setFillColor(value.As<Napi::String>());
+  } else if (value.IsObject()) {
+    InstanceData *data = env.GetInstanceData<InstanceData>();
+    Napi::Object obj = value.As<Napi::Object>();
+    if (obj.InstanceOf(data->CanvasGradientCtor.Value()).UnwrapOr(false)) {
+      _fillStyle.Reset(obj);
+      Gradient *grad = Gradient::Unwrap(obj);
+      state->fillGradient = grad->pattern();
+    } else if (obj.InstanceOf(data->CanvasPatternCtor.Value()).UnwrapOr(false)) {
+      _fillStyle.Reset(obj);
+      Pattern *pattern = Pattern::Unwrap(obj);
+      state->fillPattern = pattern->pattern();
+    }
+  }
+}
+
+/*
+ * Get current stroke style.
+ */
+
+Napi::Value
+Context2d::GetStrokeStyle(const Napi::CallbackInfo& info) {
+  Napi::Value style;
+
+  if (_strokeStyle.IsEmpty())
+    style = _getStrokeColor();
+  else
+    style = _strokeStyle.Value();
+
+  return style;
+}
+
+/*
+ * Set current stroke style.
+ */
+
+void
+Context2d::SetStrokeStyle(const Napi::CallbackInfo& info, const Napi::Value& value) {
+  if (value.IsString()) {
+    _strokeStyle.Reset();
+    _setStrokeColor(value.As<Napi::String>());
+  } else if (value.IsObject()) {
+    InstanceData *data = env.GetInstanceData<InstanceData>();
+    Napi::Object obj = value.As<Napi::Object>();
+    if (obj.InstanceOf(data->CanvasGradientCtor.Value()).UnwrapOr(false)) {
+      _strokeStyle.Reset(obj);
+      Gradient *grad = Gradient::Unwrap(obj);
+      state->strokeGradient = grad->pattern();
+    } else if (obj.InstanceOf(data->CanvasPatternCtor.Value()).UnwrapOr(false)) {
+      _strokeStyle.Reset(value);
+      Pattern *pattern = Pattern::Unwrap(obj);
+      state->strokePattern = pattern->pattern();
+    }
+  }
 }
 
 /*
  * Get miter limit.
  */
 
-NAN_GETTER(Context2d::GetMiterLimit) {
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  info.GetReturnValue().Set(Nan::New<Number>(cairo_get_miter_limit(context->context())));
+Napi::Value
+Context2d::GetMiterLimit(const Napi::CallbackInfo& info) {
+  return Napi::Number::New(env, cairo_get_miter_limit(context()));
 }
 
 /*
  * Set miter limit.
  */
 
-NAN_SETTER(Context2d::SetMiterLimit) {
-  double n = value->NumberValue();
-  if (n > 0) {
-    Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-    cairo_set_miter_limit(context->context(), n);
+void
+Context2d::SetMiterLimit(const Napi::CallbackInfo& info, const Napi::Value& value) {
+  Napi::Maybe<Napi::Number> numberValue = value.ToNumber();
+  if (numberValue.IsJust()) {
+    double n = numberValue.Unwrap().DoubleValue();
+    if (n > 0) cairo_set_miter_limit(context(), n);
   }
 }
 
@@ -1266,20 +1998,23 @@ NAN_SETTER(Context2d::SetMiterLimit) {
  * Get line width.
  */
 
-NAN_GETTER(Context2d::GetLineWidth) {
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  info.GetReturnValue().Set(Nan::New<Number>(cairo_get_line_width(context->context())));
+Napi::Value
+Context2d::GetLineWidth(const Napi::CallbackInfo& info) {
+  return Napi::Number::New(env, cairo_get_line_width(context()));
 }
 
 /*
  * Set line width.
  */
 
-NAN_SETTER(Context2d::SetLineWidth) {
-  double n = value->NumberValue();
-  if (n > 0 && n != std::numeric_limits<double>::infinity()) {
-    Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-    cairo_set_line_width(context->context(), n);
+void
+Context2d::SetLineWidth(const Napi::CallbackInfo& info, const Napi::Value& value) {
+  Napi::Maybe<Napi::Number> numberValue = value.ToNumber();
+  if (numberValue.IsJust()) {
+    double n = numberValue.Unwrap().DoubleValue();
+    if (n > 0 && n != std::numeric_limits<double>::infinity()) {
+      cairo_set_line_width(context(), n);
+    }
   }
 }
 
@@ -1287,31 +2022,35 @@ NAN_SETTER(Context2d::SetLineWidth) {
  * Get line join.
  */
 
-NAN_GETTER(Context2d::GetLineJoin) {
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
+Napi::Value
+Context2d::GetLineJoin(const Napi::CallbackInfo& info) {
   const char *join;
-  switch (cairo_get_line_join(context->context())) {
+  switch (cairo_get_line_join(context())) {
     case CAIRO_LINE_JOIN_BEVEL: join = "bevel"; break;
     case CAIRO_LINE_JOIN_ROUND: join = "round"; break;
     default: join = "miter";
   }
-  info.GetReturnValue().Set(Nan::New(join).ToLocalChecked());
+  return Napi::String::New(env, join);
 }
 
 /*
  * Set line join.
  */
 
-NAN_SETTER(Context2d::SetLineJoin) {
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  cairo_t *ctx = context->context();
-  String::Utf8Value type(value->ToString());
-  if (0 == strcmp("round", *type)) {
-    cairo_set_line_join(ctx, CAIRO_LINE_JOIN_ROUND);
-  } else if (0 == strcmp("bevel", *type)) {
-    cairo_set_line_join(ctx, CAIRO_LINE_JOIN_BEVEL);
-  } else {
-    cairo_set_line_join(ctx, CAIRO_LINE_JOIN_MITER);
+void
+Context2d::SetLineJoin(const Napi::CallbackInfo& info, const Napi::Value& value) {
+  Napi::Maybe<Napi::String> stringValue = value.ToString();
+  cairo_t *ctx = context();
+
+  if (stringValue.IsJust()) {
+    std::string type = stringValue.Unwrap().Utf8Value();
+    if (type == "round") {
+      cairo_set_line_join(ctx, CAIRO_LINE_JOIN_ROUND);
+    } else if (type == "bevel") {
+      cairo_set_line_join(ctx, CAIRO_LINE_JOIN_BEVEL);
+    } else {
+      cairo_set_line_join(ctx, CAIRO_LINE_JOIN_MITER);
+    }
   }
 }
 
@@ -1319,31 +2058,35 @@ NAN_SETTER(Context2d::SetLineJoin) {
  * Get line cap.
  */
 
-NAN_GETTER(Context2d::GetLineCap) {
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
+Napi::Value
+Context2d::GetLineCap(const Napi::CallbackInfo& info) {
   const char *cap;
-  switch (cairo_get_line_cap(context->context())) {
+  switch (cairo_get_line_cap(context())) {
     case CAIRO_LINE_CAP_ROUND: cap = "round"; break;
     case CAIRO_LINE_CAP_SQUARE: cap = "square"; break;
     default: cap = "butt";
   }
-  info.GetReturnValue().Set(Nan::New(cap).ToLocalChecked());
+  return Napi::String::New(env, cap);
 }
 
 /*
  * Set line cap.
  */
 
-NAN_SETTER(Context2d::SetLineCap) {
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  cairo_t *ctx = context->context();
-  String::Utf8Value type(value->ToString());
-  if (0 == strcmp("round", *type)) {
-    cairo_set_line_cap(ctx, CAIRO_LINE_CAP_ROUND);
-  } else if (0 == strcmp("square", *type)) {
-    cairo_set_line_cap(ctx, CAIRO_LINE_CAP_SQUARE);
-  } else {
-    cairo_set_line_cap(ctx, CAIRO_LINE_CAP_BUTT);
+void
+Context2d::SetLineCap(const Napi::CallbackInfo& info, const Napi::Value& value) {
+  Napi::Maybe<Napi::String> stringValue = value.ToString();
+  cairo_t *ctx = context();
+
+  if (stringValue.IsJust()) {
+    std::string type = stringValue.Unwrap().Utf8Value();
+    if (type == "round") {
+      cairo_set_line_cap(ctx, CAIRO_LINE_CAP_ROUND);
+    } else if (type == "square") {
+      cairo_set_line_cap(ctx, CAIRO_LINE_CAP_SQUARE);
+    } else {
+      cairo_set_line_cap(ctx, CAIRO_LINE_CAP_BUTT);
+    }
   }
 }
 
@@ -1351,68 +2094,30 @@ NAN_SETTER(Context2d::SetLineCap) {
  * Check if the given point is within the current path.
  */
 
-NAN_METHOD(Context2d::IsPointInPath) {
-  if (info[0]->IsNumber() && info[1]->IsNumber()) {
-    Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-    cairo_t *ctx = context->context();
-    double x = info[0]->NumberValue()
-         , y = info[1]->NumberValue();
-    context->setFillRule(info[2]);
-    info.GetReturnValue().Set(Nan::New<Boolean>(cairo_in_fill(ctx, x, y) || cairo_in_stroke(ctx, x, y)));
-    return;
+Napi::Value
+Context2d::IsPointInPath(const Napi::CallbackInfo& info) {
+  if (info[0].IsNumber() && info[1].IsNumber()) {
+    cairo_t *ctx = context();
+    double x = info[0].As<Napi::Number>(), y = info[1].As<Napi::Number>();
+    setFillRule(info[2]);
+    return Napi::Boolean::New(env, cairo_in_fill(ctx, x, y) || cairo_in_stroke(ctx, x, y));
   }
-  info.GetReturnValue().Set(Nan::False());
-}
-
-/*
- * Set fill pattern, useV internally for fillStyle=
- */
-
-NAN_METHOD(Context2d::SetFillPattern) {
-  Local<Object> obj = info[0]->ToObject();
-  if (Nan::New(Gradient::constructor)->HasInstance(obj)){
-    Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-    Gradient *grad = Nan::ObjectWrap::Unwrap<Gradient>(obj);
-    context->state->fillGradient = grad->pattern();
-  } else if(Nan::New(Pattern::constructor)->HasInstance(obj)){
-    Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-    Pattern *pattern = Nan::ObjectWrap::Unwrap<Pattern>(obj);
-    context->state->fillPattern = pattern->pattern();
-  } else {
-    return Nan::ThrowTypeError("Gradient or Pattern expected");
-  }
-}
-
-/*
- * Set stroke pattern, used internally for strokeStyle=
- */
-
-NAN_METHOD(Context2d::SetStrokePattern) {
-  Local<Object> obj = info[0]->ToObject();
-  if (Nan::New(Gradient::constructor)->HasInstance(obj)){
-    Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-    Gradient *grad = Nan::ObjectWrap::Unwrap<Gradient>(obj);
-    context->state->strokeGradient = grad->pattern();
-  } else if(Nan::New(Pattern::constructor)->HasInstance(obj)){
-    Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-    Pattern *pattern = Nan::ObjectWrap::Unwrap<Pattern>(obj);
-    context->state->strokePattern = pattern->pattern();
-  } else {
-    return Nan::ThrowTypeError("Gradient or Pattern expected");
-  }
+  return Napi::Boolean::New(env, false);
 }
 
 /*
  * Set shadow color.
  */
 
-NAN_SETTER(Context2d::SetShadowColor) {
+void
+Context2d::SetShadowColor(const Napi::CallbackInfo& info, const Napi::Value& value) {
+  Napi::Maybe<Napi::String> stringValue = value.ToString();
   short ok;
-  String::Utf8Value str(value->ToString());
-  uint32_t rgba = rgba_from_string(*str, &ok);
-  if (ok) {
-    Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-    context->state->shadow = rgba_create(rgba);
+
+  if (stringValue.IsJust()) {
+    std::string str = stringValue.Unwrap().Utf8Value();
+    uint32_t rgba = rgba_from_string(str.c_str(), &ok);
+    if (ok) state->shadow = rgba_create(rgba);
   }
 }
 
@@ -1420,105 +2125,128 @@ NAN_SETTER(Context2d::SetShadowColor) {
  * Get shadow color.
  */
 
-NAN_GETTER(Context2d::GetShadowColor) {
+Napi::Value
+Context2d::GetShadowColor(const Napi::CallbackInfo& info) {
   char buf[64];
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  rgba_to_string(context->state->shadow, buf, sizeof(buf));
-  info.GetReturnValue().Set(Nan::New<String>(buf).ToLocalChecked());
+  rgba_to_string(state->shadow, buf, sizeof(buf));
+  return Napi::String::New(env, buf);
 }
 
 /*
  * Set fill color, used internally for fillStyle=
  */
 
-NAN_METHOD(Context2d::SetFillColor) {
+void
+Context2d::_setFillColor(Napi::Value arg) {
+  Napi::Maybe<Napi::String> stringValue = arg.ToString();
   short ok;
-  if (!info[0]->IsString()) return;
-  String::Utf8Value str(info[0]);
-  uint32_t rgba = rgba_from_string(*str, &ok);
-  if (!ok) return;
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  context->state->fillPattern = context->state->fillGradient = NULL;
-  context->state->fill = rgba_create(rgba);
+
+  if (stringValue.IsJust()) {
+    Napi::String str = stringValue.Unwrap();
+    char buf[128] = {0};
+    napi_status status = napi_get_value_string_utf8(env, str, buf, sizeof(buf) - 1, nullptr);
+    if (status != napi_ok) return;
+    uint32_t rgba = rgba_from_string(buf, &ok);
+    if (!ok) return;
+    state->fillPattern = state->fillGradient = NULL;
+    state->fill = rgba_create(rgba);
+  }
 }
 
 /*
  * Get fill color.
  */
 
-NAN_GETTER(Context2d::GetFillColor) {
+Napi::Value
+Context2d::_getFillColor() {
   char buf[64];
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  rgba_to_string(context->state->fill, buf, sizeof(buf));
-  info.GetReturnValue().Set(Nan::New<String>(buf).ToLocalChecked());
+  rgba_to_string(state->fill, buf, sizeof(buf));
+  return Napi::String::New(env, buf);
 }
 
 /*
  * Set stroke color, used internally for strokeStyle=
  */
 
-NAN_METHOD(Context2d::SetStrokeColor) {
+void
+Context2d::_setStrokeColor(Napi::Value arg) {
   short ok;
-  if (!info[0]->IsString()) return;
-  String::Utf8Value str(info[0]);
-  uint32_t rgba = rgba_from_string(*str, &ok);
+  std::string str = arg.As<Napi::String>();
+  uint32_t rgba = rgba_from_string(str.c_str(), &ok);
   if (!ok) return;
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  context->state->strokePattern = context->state->strokeGradient = NULL;
-  context->state->stroke = rgba_create(rgba);
+  state->strokePattern = state->strokeGradient = NULL;
+  state->stroke = rgba_create(rgba);
 }
 
 /*
  * Get stroke color.
  */
 
-NAN_GETTER(Context2d::GetStrokeColor) {
+Napi::Value
+Context2d::_getStrokeColor() {
   char buf[64];
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  rgba_to_string(context->state->stroke, buf, sizeof(buf));
-  info.GetReturnValue().Set(Nan::New<String>(buf).ToLocalChecked());
+  rgba_to_string(state->stroke, buf, sizeof(buf));
+  return Napi::String::New(env, buf);
+}
+
+Napi::Value
+Context2d::CreatePattern(const Napi::CallbackInfo& info) {
+  Napi::Function ctor = env.GetInstanceData<InstanceData>()->CanvasPatternCtor.Value();
+  Napi::Maybe<Napi::Object> ret = ctor.New({ info[0], info[1] });
+  return ret.IsJust() ? ret.Unwrap() : env.Undefined();
+}
+
+Napi::Value
+Context2d::CreateLinearGradient(const Napi::CallbackInfo& info) {
+  Napi::Function ctor = env.GetInstanceData<InstanceData>()->CanvasGradientCtor.Value();
+  Napi::Maybe<Napi::Object> ret = ctor.New({ info[0], info[1], info[2], info[3] });
+  return ret.IsJust() ? ret.Unwrap() : env.Undefined();
+
+}
+
+Napi::Value
+Context2d::CreateRadialGradient(const Napi::CallbackInfo& info) {
+  Napi::Function ctor = env.GetInstanceData<InstanceData>()->CanvasGradientCtor.Value();
+  Napi::Maybe<Napi::Object> ret = ctor.New({ info[0], info[1], info[2], info[3], info[4], info[5] });
+  return ret.IsJust() ? ret.Unwrap() : env.Undefined();
 }
 
 /*
  * Bezier curve.
  */
 
-NAN_METHOD(Context2d::BezierCurveTo) {
-  if (!info[0]->IsNumber()
-    ||!info[1]->IsNumber()
-    ||!info[2]->IsNumber()
-    ||!info[3]->IsNumber()
-    ||!info[4]->IsNumber()
-    ||!info[5]->IsNumber()) return;
+void
+Context2d::BezierCurveTo(const Napi::CallbackInfo& info) {
+  double args[6];
+  if(!checkArgs(info, args, 6))
+    return;
 
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  cairo_curve_to(context->context()
-    , info[0]->NumberValue()
-    , info[1]->NumberValue()
-    , info[2]->NumberValue()
-    , info[3]->NumberValue()
-    , info[4]->NumberValue()
-    , info[5]->NumberValue());
+  cairo_curve_to(context()
+    , args[0]
+    , args[1]
+    , args[2]
+    , args[3]
+    , args[4]
+    , args[5]);
 }
 
 /*
  * Quadratic curve approximation from libsvg-cairo.
  */
 
-NAN_METHOD(Context2d::QuadraticCurveTo) {
-  if (!info[0]->IsNumber()
-    ||!info[1]->IsNumber()
-    ||!info[2]->IsNumber()
-    ||!info[3]->IsNumber()) return;
+void
+Context2d::QuadraticCurveTo(const Napi::CallbackInfo& info) {
+  double args[4];
+  if(!checkArgs(info, args, 4))
+    return;
 
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  cairo_t *ctx = context->context();
+  cairo_t *ctx = context();
 
   double x, y
-    , x1 = info[0]->NumberValue()
-    , y1 = info[1]->NumberValue()
-    , x2 = info[2]->NumberValue()
-    , y2 = info[3]->NumberValue();
+    , x1 = args[0]
+    , y1 = args[1]
+    , x2 = args[2]
+    , y2 = args[3];
 
   cairo_get_current_point(ctx, &x, &y);
 
@@ -1538,105 +2266,151 @@ NAN_METHOD(Context2d::QuadraticCurveTo) {
  * Save state.
  */
 
-NAN_METHOD(Context2d::Save) {
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  context->save();
+void
+Context2d::Save(const Napi::CallbackInfo& info) {
+  save();
 }
 
 /*
  * Restore state.
  */
 
-NAN_METHOD(Context2d::Restore) {
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  context->restore();
+void
+Context2d::Restore(const Napi::CallbackInfo& info) {
+  restore();
 }
 
 /*
  * Creates a new subpath.
  */
 
-NAN_METHOD(Context2d::BeginPath) {
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  cairo_new_path(context->context());
+void
+Context2d::BeginPath(const Napi::CallbackInfo& info) {
+  cairo_new_path(context());
 }
 
 /*
  * Marks the subpath as closed.
  */
 
-NAN_METHOD(Context2d::ClosePath) {
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  cairo_close_path(context->context());
+void
+Context2d::ClosePath(const Napi::CallbackInfo& info) {
+  cairo_close_path(context());
 }
 
 /*
  * Rotate transformation.
  */
 
-NAN_METHOD(Context2d::Rotate) {
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  cairo_rotate(context->context()
-    , info[0]->IsNumber() ? info[0]->NumberValue() : 0);
+void
+Context2d::Rotate(const Napi::CallbackInfo& info) {
+  double args[1];
+  if(!checkArgs(info, args, 1))
+    return;
+
+  cairo_rotate(context(), args[0]);
 }
 
 /*
  * Modify the CTM.
  */
 
-NAN_METHOD(Context2d::Transform) {
+void
+Context2d::Transform(const Napi::CallbackInfo& info) {
+  double args[6];
+  if(!checkArgs(info, args, 6))
+    return;
+
   cairo_matrix_t matrix;
   cairo_matrix_init(&matrix
-    , info[0]->IsNumber() ? info[0]->NumberValue() : 0
-    , info[1]->IsNumber() ? info[1]->NumberValue() : 0
-    , info[2]->IsNumber() ? info[2]->NumberValue() : 0
-    , info[3]->IsNumber() ? info[3]->NumberValue() : 0
-    , info[4]->IsNumber() ? info[4]->NumberValue() : 0
-    , info[5]->IsNumber() ? info[5]->NumberValue() : 0);
+    , args[0]
+    , args[1]
+    , args[2]
+    , args[3]
+    , args[4]
+    , args[5]);
 
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  cairo_transform(context->context(), &matrix);
+  cairo_transform(context(), &matrix);
+}
+
+/*
+ * Get the CTM
+ */
+
+Napi::Value
+Context2d::GetTransform(const Napi::CallbackInfo& info) {
+  return get_current_transform();
 }
 
 /*
  * Reset the CTM, used internally by setTransform().
  */
 
-NAN_METHOD(Context2d::ResetTransform) {
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  cairo_identity_matrix(context->context());
+void
+Context2d::ResetTransform(const Napi::CallbackInfo& info) {
+  cairo_identity_matrix(context());
+}
+
+/*
+ * Reset transform matrix to identity, then apply the given args.
+ */
+
+void
+Context2d::SetTransform(const Napi::CallbackInfo& info) {
+  Napi::Object mat;
+
+  if (info.Length() == 1 && info[0].ToObject().UnwrapTo(&mat)) {
+    if (!mat.InstanceOf(env.GetInstanceData<InstanceData>()->DOMMatrixCtor.Value()).UnwrapOr(false)) {
+      if (!env.IsExceptionPending()) {
+        Napi::TypeError::New(env, "Expected DOMMatrix").ThrowAsJavaScriptException();
+      }
+      return;
+    }
+
+    cairo_matrix_t matrix;
+    parse_matrix_from_object(matrix, mat);
+
+    cairo_set_matrix(context(), &matrix);
+  } else {
+    cairo_identity_matrix(context());
+    Context2d::Transform(info);
+  }
 }
 
 /*
  * Translate transformation.
  */
 
-NAN_METHOD(Context2d::Translate) {
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  cairo_translate(context->context()
-    , info[0]->IsNumber() ? info[0]->NumberValue() : 0
-    , info[1]->IsNumber() ? info[1]->NumberValue() : 0);
+void
+Context2d::Translate(const Napi::CallbackInfo& info) {
+  double args[2];
+  if(!checkArgs(info, args, 2))
+    return;
+
+  cairo_translate(context(), args[0], args[1]);
 }
 
 /*
  * Scale transformation.
  */
 
-NAN_METHOD(Context2d::Scale) {
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  cairo_scale(context->context()
-    , info[0]->IsNumber() ? info[0]->NumberValue() : 0
-    , info[1]->IsNumber() ? info[1]->NumberValue() : 0);
+void
+Context2d::Scale(const Napi::CallbackInfo& info) {
+  double args[2];
+  if(!checkArgs(info, args, 2))
+    return;
+
+  cairo_scale(context(), args[0], args[1]);
 }
 
 /*
  * Use path as clipping region.
  */
 
-NAN_METHOD(Context2d::Clip) {
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  context->setFillRule(info[0]);
-  cairo_t *ctx = context->context();
+void
+Context2d::Clip(const Napi::CallbackInfo& info) {
+  setFillRule(info[0]);
+  cairo_t *ctx = context();
   cairo_clip_preserve(ctx);
 }
 
@@ -1644,112 +2418,177 @@ NAN_METHOD(Context2d::Clip) {
  * Fill the path.
  */
 
-NAN_METHOD(Context2d::Fill) {
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  context->setFillRule(info[0]);
-  context->fill(true);
+void
+Context2d::Fill(const Napi::CallbackInfo& info) {
+  setFillRule(info[0]);
+  fill(true);
 }
 
 /*
  * Stroke the path.
  */
 
-NAN_METHOD(Context2d::Stroke) {
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  context->stroke(true);
+void
+Context2d::Stroke(const Napi::CallbackInfo& info) {
+  stroke(true);
+}
+
+/*
+ * Helper for fillText/strokeText
+ */
+
+double
+get_text_scale(PangoLayout *layout, double maxWidth) {
+
+  PangoRectangle logical_rect;
+  pango_layout_get_pixel_extents(layout, NULL, &logical_rect);
+
+  if (logical_rect.width > maxWidth) {
+    return maxWidth / logical_rect.width;
+  } else {
+    return 1.0;
+  }
+}
+
+/*
+ * Make sure the layout's font list is up-to-date
+ */
+void
+Context2d::checkFonts() {
+  // If fonts have been registered, the PangoContext is using an outdated FontMap
+  if (canvas()->fontSerial != fontSerial) {
+    pango_context_set_font_map(
+      pango_layout_get_context(_layout),
+      pango_cairo_font_map_get_default()
+    );
+
+    fontSerial = canvas()->fontSerial;
+  }
+}
+
+void
+Context2d::paintText(const Napi::CallbackInfo& info, bool stroke) {
+  int argsNum = info.Length() >= 4 ? 3 : 2;
+
+  if (argsNum == 3 && info[3].IsUndefined())
+    argsNum = 2;
+
+  double args[3];
+  if(!checkArgs(info, args, argsNum, 1))
+    return;
+
+  Napi::String strValue;
+
+  if (!info[0].ToString().UnwrapTo(&strValue)) return;
+
+  std::string str = strValue.Utf8Value();
+  double x = args[0];
+  double y = args[1];
+  double scaled_by = 1;
+
+  PangoLayout *layout = this->layout();
+
+  checkFonts();
+  pango_layout_set_text(layout, str.c_str(), -1);
+  pango_cairo_update_layout(context(), layout);
+
+  PangoDirection pango_dir = state->direction == "ltr" ? PANGO_DIRECTION_LTR : PANGO_DIRECTION_RTL;
+  pango_context_set_base_dir(pango_layout_get_context(_layout), pango_dir);
+
+  if (argsNum == 3) {
+    scaled_by = get_text_scale(layout, args[2]);
+    cairo_save(context());
+    cairo_scale(context(), scaled_by, 1);
+  }
+
+  savePath();
+  if (state->textDrawingMode == TEXT_DRAW_GLYPHS) {
+    if (stroke == true) { this->stroke(); } else { this->fill(); }
+    setTextPath(x / scaled_by, y);
+  } else if (state->textDrawingMode == TEXT_DRAW_PATHS) {
+    setTextPath(x / scaled_by, y);
+    if (stroke == true) { this->stroke(); } else { this->fill(); }
+  }
+  restorePath();
+  if (argsNum == 3) {
+    cairo_restore(context());
+  }
 }
 
 /*
  * Fill text at (x, y).
  */
 
-NAN_METHOD(Context2d::FillText) {
-  if (!info[1]->IsNumber()
-    || !info[2]->IsNumber()) return;
-
-  String::Utf8Value str(info[0]->ToString());
-  double x = info[1]->NumberValue();
-  double y = info[2]->NumberValue();
-
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-
-  context->savePath();
-  if (context->state->textDrawingMode == TEXT_DRAW_GLYPHS) {
-    context->fill();
-    context->setTextPath(*str, x, y);
-  } else if (context->state->textDrawingMode == TEXT_DRAW_PATHS) {
-    context->setTextPath(*str, x, y);
-    context->fill();
-  }
-  context->restorePath();
+void
+Context2d::FillText(const Napi::CallbackInfo& info) {
+  paintText(info, false);
 }
 
 /*
  * Stroke text at (x ,y).
  */
 
-NAN_METHOD(Context2d::StrokeText) {
-  if (!info[1]->IsNumber()
-    || !info[2]->IsNumber()) return;
-
-  String::Utf8Value str(info[0]->ToString());
-  double x = info[1]->NumberValue();
-  double y = info[2]->NumberValue();
-
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-
-  context->savePath();
-  if (context->state->textDrawingMode == TEXT_DRAW_GLYPHS) {
-    context->stroke();
-    context->setTextPath(*str, x, y);
-  } else if (context->state->textDrawingMode == TEXT_DRAW_PATHS) {
-    context->setTextPath(*str, x, y);
-    context->stroke();
-  }
-  context->restorePath();
+void
+Context2d::StrokeText(const Napi::CallbackInfo& info) {
+  paintText(info, true);
 }
 
 /*
- * Set text path for the given string at (x, y).
+ * Gets the baseline adjustment in device pixels
+ */
+inline double getBaselineAdjustment(PangoLayout* layout, short baseline) {
+  PangoRectangle logical_rect;
+  pango_layout_line_get_extents(pango_layout_get_line(layout, 0), NULL, &logical_rect);
+
+  double scale = 1.0 / PANGO_SCALE;
+  double ascent = scale * pango_layout_get_baseline(layout);
+  double descent = scale * logical_rect.height - ascent;
+
+  switch (baseline) {
+  case TEXT_BASELINE_ALPHABETIC:
+    return ascent;
+  case TEXT_BASELINE_MIDDLE:
+    return (ascent + descent) / 2.0;
+  case TEXT_BASELINE_BOTTOM:
+    return ascent + descent;
+  default:
+    return 0;
+  }
+}
+
+/*
+ * Set text path for the string in the layout at (x, y).
+ * This function is called by paintText and won't behave correctly
+ * if is not called from there.
+ * it needs pango_layout_set_text and pango_cairo_update_layout to be called before
  */
 
 void
-Context2d::setTextPath(const char *str, double x, double y) {
-  PangoRectangle ink_rect, logical_rect;
-  PangoFontMetrics *metrics = NULL;
+Context2d::setTextPath(double x, double y) {
+  PangoRectangle logical_rect;
+  text_align_t alignment = state->textAlignment;
 
-  pango_layout_set_text(_layout, str, -1);
-  pango_cairo_update_layout(_context, _layout);
+  // Convert start/end to left/right based on direction
+  if (alignment == TEXT_ALIGNMENT_START) {
+    alignment = (state->direction == "rtl") ? TEXT_ALIGNMENT_RIGHT : TEXT_ALIGNMENT_LEFT;
+  } else if (alignment == TEXT_ALIGNMENT_END) {
+    alignment = (state->direction == "rtl") ? TEXT_ALIGNMENT_LEFT : TEXT_ALIGNMENT_RIGHT;
+  }
 
-  switch (state->textAlignment) {
-    // center
-    case 0:
-      pango_layout_get_pixel_extents(_layout, &ink_rect, &logical_rect);
+  switch (alignment) {
+    case TEXT_ALIGNMENT_CENTER:
+      pango_layout_get_pixel_extents(_layout, NULL, &logical_rect);
       x -= logical_rect.width / 2;
       break;
-    // right
-    case 1:
-      pango_layout_get_pixel_extents(_layout, &ink_rect, &logical_rect);
+    case TEXT_ALIGNMENT_RIGHT:
+      pango_layout_get_pixel_extents(_layout, NULL, &logical_rect);
       x -= logical_rect.width;
       break;
-  }
-
-  switch (state->textBaseline) {
-    case TEXT_BASELINE_ALPHABETIC:
-      metrics = PANGO_LAYOUT_GET_METRICS(_layout);
-      y -= pango_font_metrics_get_ascent(metrics) / PANGO_SCALE;
-      break;
-    case TEXT_BASELINE_MIDDLE:
-      metrics = PANGO_LAYOUT_GET_METRICS(_layout);
-      y -= (pango_font_metrics_get_ascent(metrics) + pango_font_metrics_get_descent(metrics))/(2.0 * PANGO_SCALE);
-      break;
-    case TEXT_BASELINE_BOTTOM:
-      metrics = PANGO_LAYOUT_GET_METRICS(_layout);
-      y -= (pango_font_metrics_get_ascent(metrics) + pango_font_metrics_get_descent(metrics)) / PANGO_SCALE;
+    default: // TEXT_ALIGNMENT_LEFT
       break;
   }
 
-  if (metrics) pango_font_metrics_unref(metrics);
+  y -= getBaselineAdjustment(_layout, state->textBaseline);
 
   cairo_move_to(_context, x, y);
   if (state->textDrawingMode == TEXT_DRAW_PATHS) {
@@ -1763,32 +2602,35 @@ Context2d::setTextPath(const char *str, double x, double y) {
  * Adds a point to the current subpath.
  */
 
-NAN_METHOD(Context2d::LineTo) {
-  if (!info[0]->IsNumber())
-    return Nan::ThrowTypeError("lineTo() x must be a number");
-  if (!info[1]->IsNumber())
-    return Nan::ThrowTypeError("lineTo() y must be a number");
+void
+Context2d::LineTo(const Napi::CallbackInfo& info) {
+  double args[2];
+  if(!checkArgs(info, args, 2))
+    return;
 
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  cairo_line_to(context->context()
-    , info[0]->NumberValue()
-    , info[1]->NumberValue());
+  cairo_line_to(context(), args[0], args[1]);
 }
 
 /*
  * Creates a new subpath at the given point.
  */
 
-NAN_METHOD(Context2d::MoveTo) {
-  if (!info[0]->IsNumber())
-    return Nan::ThrowTypeError("moveTo() x must be a number");
-  if (!info[1]->IsNumber())
-    return Nan::ThrowTypeError("moveTo() y must be a number");
+void
+Context2d::MoveTo(const Napi::CallbackInfo& info) {
+  double args[2];
+  if(!checkArgs(info, args, 2))
+    return;
 
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  cairo_move_to(context->context()
-    , info[0]->NumberValue()
-    , info[1]->NumberValue());
+  cairo_move_to(context(), args[0], args[1]);
+}
+
+/*
+ * Get font.
+ */
+
+Napi::Value
+Context2d::GetFont(const Napi::CallbackInfo& info) {
+  return Napi::String::New(env, state->font);
 }
 
 /*
@@ -1800,38 +2642,133 @@ NAN_METHOD(Context2d::MoveTo) {
  *   - family
  */
 
-NAN_METHOD(Context2d::SetFont) {
-  // Ignore invalid args
-  if (!info[0]->IsString()
-    || !info[1]->IsString()
-    || !info[2]->IsNumber()
-    || !info[3]->IsString()
-    || !info[4]->IsString()) return;
+void
+Context2d::SetFont(const Napi::CallbackInfo& info, const Napi::Value& value) {
+  if (!value.IsString()) return;
 
-  String::Utf8Value weight(info[0]);
-  String::Utf8Value style(info[1]);
-  double size = info[2]->NumberValue();
-  String::Utf8Value unit(info[3]);
-  String::Utf8Value family(info[4]);
+  std::string str = value.As<Napi::String>().Utf8Value();
+  if (!str.length()) return;
 
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
+  bool success;
+  auto props = FontParser::parse(str, &success);
+  if (!success) return;
 
-  PangoFontDescription *desc = pango_font_description_copy(context->state->fontDescription);
-  pango_font_description_free(context->state->fontDescription);
+  PangoFontDescription *desc = pango_font_description_copy(state->fontDescription);
+  pango_font_description_free(state->fontDescription);
 
-  pango_font_description_set_style(desc, Canvas::GetStyleFromCSSString(*style));
-  pango_font_description_set_weight(desc, Canvas::GetWeightFromCSSString(*weight));
+  PangoStyle style = props.fontStyle == FontStyle::Italic ? PANGO_STYLE_ITALIC
+    : props.fontStyle == FontStyle::Oblique ? PANGO_STYLE_OBLIQUE
+    : PANGO_STYLE_NORMAL;
+  pango_font_description_set_style(desc, style);
 
-  if (strlen(*family) > 0) pango_font_description_set_family(desc, *family);
+  pango_font_description_set_weight(desc, static_cast<PangoWeight>(props.fontWeight));
+
+  std::string family = props.fontFamily.empty() ? "" : props.fontFamily[0];
+  for (size_t i = 1; i < props.fontFamily.size(); i++) {
+    family += "," + props.fontFamily[i];
+  }
+  if (family.length() > 0) {
+    // See #1643 - Pango understands "sans" whereas CSS uses "sans-serif"
+    std::string s1(family);
+    std::string s2("sans-serif");
+    if (streq_casein(s1, s2)) {
+      pango_font_description_set_family(desc, "sans");
+    } else {
+      pango_font_description_set_family(desc, family.c_str());
+    }
+  }
 
   PangoFontDescription *sys_desc = Canvas::ResolveFontDescription(desc);
   pango_font_description_free(desc);
 
-  if (size > 0) pango_font_description_set_absolute_size(sys_desc, size * PANGO_SCALE);
+  if (props.fontSize > 0) pango_font_description_set_absolute_size(sys_desc, props.fontSize * PANGO_SCALE);
 
-  context->state->fontDescription = sys_desc;
+  state->fontDescription = sys_desc;
+  pango_layout_set_font_description(_layout, sys_desc);
 
-  pango_layout_set_font_description(context->_layout, sys_desc);
+  state->font = str;
+}
+
+/*
+ * Get text baseline.
+ */
+
+Napi::Value
+Context2d::GetTextBaseline(const Napi::CallbackInfo& info) {
+  const char* baseline;
+  switch (state->textBaseline) {
+    default:
+    case TEXT_BASELINE_ALPHABETIC: baseline = "alphabetic"; break;
+    case TEXT_BASELINE_TOP: baseline = "top"; break;
+    case TEXT_BASELINE_BOTTOM: baseline = "bottom"; break;
+    case TEXT_BASELINE_MIDDLE: baseline = "middle"; break;
+    case TEXT_BASELINE_IDEOGRAPHIC: baseline = "ideographic"; break;
+    case TEXT_BASELINE_HANGING: baseline = "hanging"; break;
+  }
+  return Napi::String::New(env, baseline);
+}
+
+/*
+ * Set text baseline.
+ */
+
+void
+Context2d::SetTextBaseline(const Napi::CallbackInfo& info, const Napi::Value& value) {
+  if (!value.IsString()) return;
+
+  std::string opStr = value.As<Napi::String>();
+  const std::map<std::string, text_baseline_t> modes = {
+    {"alphabetic", TEXT_BASELINE_ALPHABETIC},
+    {"top", TEXT_BASELINE_TOP},
+    {"bottom", TEXT_BASELINE_BOTTOM},
+    {"middle", TEXT_BASELINE_MIDDLE},
+    {"ideographic", TEXT_BASELINE_IDEOGRAPHIC},
+    {"hanging", TEXT_BASELINE_HANGING}
+  };
+  auto op = modes.find(opStr);
+  if (op == modes.end()) return;
+
+  state->textBaseline = op->second;
+}
+
+/*
+ * Get text align.
+ */
+
+Napi::Value
+Context2d::GetTextAlign(const Napi::CallbackInfo& info) {
+  const char* align;
+  switch (state->textAlignment) {
+    case TEXT_ALIGNMENT_LEFT: align = "left"; break;
+    case TEXT_ALIGNMENT_START: align = "start"; break;
+    case TEXT_ALIGNMENT_CENTER: align = "center"; break;
+    case TEXT_ALIGNMENT_RIGHT: align = "right"; break;
+    case TEXT_ALIGNMENT_END: align = "end"; break;
+    default: align = "start";
+  }
+  return Napi::String::New(env, align);
+}
+
+/*
+ * Set text align.
+ */
+
+void
+Context2d::SetTextAlign(const Napi::CallbackInfo& info, const Napi::Value& value) {
+  if (!value.IsString()) return;
+
+  std::string opStr = value.As<Napi::String>();
+  const std::map<std::string, text_align_t> modes = {
+    {"center", TEXT_ALIGNMENT_CENTER},
+    {"left", TEXT_ALIGNMENT_LEFT},
+    {"start", TEXT_ALIGNMENT_START},
+    {"right", TEXT_ALIGNMENT_RIGHT},
+    {"end", TEXT_ALIGNMENT_END}
+  };
+  auto op = modes.find(opStr);
+  if (op == modes.end()) return;
+
+  state->textAlignment = op->second;
 }
 
 /*
@@ -1841,145 +2778,136 @@ NAN_METHOD(Context2d::SetFont) {
  * fontBoundingBoxAscent, fontBoundingBoxDescent
  */
 
-NAN_METHOD(Context2d::MeasureText) {
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  cairo_t *ctx = context->context();
+Napi::Value
+Context2d::MeasureText(const Napi::CallbackInfo& info) {
+  cairo_t *ctx = this->context();
 
-  String::Utf8Value str(info[0]->ToString());
-  Local<Object> obj = Nan::New<Object>();
+  Napi::String str;
+  if (!info[0].ToString().UnwrapTo(&str)) return env.Undefined();
 
-  PangoRectangle ink_rect, logical_rect;
+  Napi::Object obj = Napi::Object::New(env);
+
+  PangoRectangle _ink_rect, _logical_rect;
+  float_rectangle ink_rect, logical_rect;
   PangoFontMetrics *metrics;
-  PangoLayout *layout = context->layout();
+  PangoLayout *layout = this->layout();
 
-  pango_layout_set_text(layout, *str, -1);
+  checkFonts();
+  pango_layout_set_text(layout, str.Utf8Value().c_str(), -1);
   pango_cairo_update_layout(ctx, layout);
 
-  pango_layout_get_pixel_extents(layout, &ink_rect, &logical_rect);
+  // Normally you could use pango_layout_get_pixel_extents and be done, or use
+  // pango_extents_to_pixels, but both of those round the pixels, so we have to
+  // divide by PANGO_SCALE manually
+  pango_layout_get_extents(layout, &_ink_rect, &_logical_rect);
+
+  float inverse_pango_scale = 1. / PANGO_SCALE;
+
+  logical_rect.x = _logical_rect.x * inverse_pango_scale;
+  logical_rect.y = _logical_rect.y * inverse_pango_scale;
+  logical_rect.width = _logical_rect.width * inverse_pango_scale;
+  logical_rect.height = _logical_rect.height * inverse_pango_scale;
+
+  ink_rect.x = _ink_rect.x * inverse_pango_scale;
+  ink_rect.y = _ink_rect.y * inverse_pango_scale;
+  ink_rect.width = _ink_rect.width * inverse_pango_scale;
+  ink_rect.height = _ink_rect.height * inverse_pango_scale;
+
   metrics = PANGO_LAYOUT_GET_METRICS(layout);
 
   double x_offset;
-  switch (context->state->textAlignment) {
-    case 0: // center
-      x_offset = logical_rect.width / 2;
+  switch (state->textAlignment) {
+    case TEXT_ALIGNMENT_CENTER:
+      x_offset = logical_rect.width / 2.;
       break;
-    case 1: // right
+    case TEXT_ALIGNMENT_END:
+    case TEXT_ALIGNMENT_RIGHT:
       x_offset = logical_rect.width;
       break;
-    default: // left
+    case TEXT_ALIGNMENT_START:
+    case TEXT_ALIGNMENT_LEFT:
+    default:
       x_offset = 0.0;
   }
 
-  double y_offset;
-  switch (context->state->textBaseline) {
-    case TEXT_BASELINE_ALPHABETIC:
-      y_offset = -pango_font_metrics_get_ascent(metrics) / PANGO_SCALE;
-      break;
-    case TEXT_BASELINE_MIDDLE:
-      y_offset = -(pango_font_metrics_get_ascent(metrics) + pango_font_metrics_get_descent(metrics))/(2.0 * PANGO_SCALE);
-      break;
-    case TEXT_BASELINE_BOTTOM:
-      y_offset = -(pango_font_metrics_get_ascent(metrics) + pango_font_metrics_get_descent(metrics)) / PANGO_SCALE;
-      break;
-    default:
-      y_offset = 0.0;
-  }
+  double y_offset = getBaselineAdjustment(layout, state->textBaseline);
 
-  obj->Set(Nan::New<String>("width").ToLocalChecked(),
-           Nan::New<Number>(logical_rect.width));
-  obj->Set(Nan::New<String>("actualBoundingBoxLeft").ToLocalChecked(),
-           Nan::New<Number>(x_offset - PANGO_LBEARING(logical_rect)));
-  obj->Set(Nan::New<String>("actualBoundingBoxRight").ToLocalChecked(),
-           Nan::New<Number>(x_offset + PANGO_RBEARING(logical_rect)));
-  obj->Set(Nan::New<String>("actualBoundingBoxAscent").ToLocalChecked(),
-           Nan::New<Number>(-(y_offset+ink_rect.y)));
-  obj->Set(Nan::New<String>("actualBoundingBoxDescent").ToLocalChecked(),
-           Nan::New<Number>((PANGO_DESCENT(ink_rect) + y_offset)));
-  obj->Set(Nan::New<String>("emHeightAscent").ToLocalChecked(),
-           Nan::New<Number>(PANGO_ASCENT(logical_rect) - y_offset));
-  obj->Set(Nan::New<String>("emHeightDescent").ToLocalChecked(),
-           Nan::New<Number>(PANGO_DESCENT(logical_rect) + y_offset));
-  obj->Set(Nan::New<String>("alphabeticBaseline").ToLocalChecked(),
-           Nan::New<Number>((pango_font_metrics_get_ascent(metrics) / PANGO_SCALE)
-                       + y_offset));
+  obj.Set("width", Napi::Number::New(env, logical_rect.width));
+  obj.Set("actualBoundingBoxLeft", Napi::Number::New(env, PANGO_LBEARING(ink_rect) + x_offset));
+  obj.Set("actualBoundingBoxRight", Napi::Number::New(env, PANGO_RBEARING(ink_rect) - x_offset));
+  obj.Set("actualBoundingBoxAscent", Napi::Number::New(env, y_offset + PANGO_ASCENT(ink_rect)));
+  obj.Set("actualBoundingBoxDescent", Napi::Number::New(env, PANGO_DESCENT(ink_rect) - y_offset));
+  obj.Set("emHeightAscent", Napi::Number::New(env, -(PANGO_ASCENT(logical_rect) - y_offset)));
+  obj.Set("emHeightDescent", Napi::Number::New(env, PANGO_DESCENT(logical_rect) - y_offset));
+  obj.Set("alphabeticBaseline", Napi::Number::New(env, -(pango_font_metrics_get_ascent(metrics) * inverse_pango_scale - y_offset)));
 
   pango_font_metrics_unref(metrics);
 
-  info.GetReturnValue().Set(obj);
-}
-
-/*
- * Set text baseline.
- */
-
-NAN_METHOD(Context2d::SetTextBaseline) {
-  if (!info[0]->IsInt32()) return;
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  context->state->textBaseline = info[0]->Int32Value();
-}
-
-/*
- * Set text alignment. -1 0 1
- */
-
-NAN_METHOD(Context2d::SetTextAlignment) {
-  if (!info[0]->IsInt32()) return;
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  context->state->textAlignment = info[0]->Int32Value();
+  return obj;
 }
 
 /*
  * Set line dash
  * ref: http://www.w3.org/TR/2dcontext/#dom-context-2d-setlinedash
  */
-NAN_METHOD(Context2d::SetLineDash) {
-  if (!info[0]->IsArray()) return;
-  Local<Array> dash = Local<Array>::Cast(info[0]);
-  uint32_t dashes = dash->Length() & 1 ? dash->Length() * 2 : dash->Length();
 
+void
+Context2d::SetLineDash(const Napi::CallbackInfo& info) {
+  if (!info[0].IsArray()) return;
+  Napi::Array dash = info[0].As<Napi::Array>();
+  uint32_t dashes = dash.Length() & 1 ? dash.Length() * 2 : dash.Length();
+  uint32_t zero_dashes = 0;
   std::vector<double> a(dashes);
   for (uint32_t i=0; i<dashes; i++) {
-    Local<Value> d = dash->Get(i % dash->Length());
-    if (!d->IsNumber()) return;
-    a[i] = d->NumberValue();
-    if (a[i] < 0 || isnan(a[i]) || isinf(a[i])) return;
+    Napi::Number d;
+    if (!dash.Get(i % dash.Length()).UnwrapTo(&d) || !d.IsNumber()) return;
+    a[i] = d.As<Napi::Number>().DoubleValue();
+    if (a[i] == 0) zero_dashes++;
+    if (a[i] < 0 || !std::isfinite(a[i])) return;
   }
 
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  cairo_t *ctx = context->context();
+  cairo_t *ctx = this->context();
   double offset;
   cairo_get_dash(ctx, NULL, &offset);
-  cairo_set_dash(ctx, a.data(), dashes, offset);
+  if (zero_dashes == dashes) {
+    std::vector<double> b(0);
+    cairo_set_dash(ctx, b.data(), 0, offset);
+  } else {
+    cairo_set_dash(ctx, a.data(), dashes, offset);
+  }
 }
 
 /*
  * Get line dash
  * ref: http://www.w3.org/TR/2dcontext/#dom-context-2d-setlinedash
  */
-NAN_METHOD(Context2d::GetLineDash) {
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  cairo_t *ctx = context->context();
+Napi::Value
+Context2d::GetLineDash(const Napi::CallbackInfo& info) {
+  cairo_t *ctx = this->context();
   int dashes = cairo_get_dash_count(ctx);
   std::vector<double> a(dashes);
   cairo_get_dash(ctx, a.data(), NULL);
 
-  Local<Array> dash = Nan::New<Array>(dashes);
-  for (int i=0; i<dashes; i++)
-      dash->Set(Nan::New<Number>(i), Nan::New<Number>(a[i]));
+  Napi::Array dash = Napi::Array::New(env, dashes);
+  for (int i=0; i<dashes; i++) {
+    dash.Set(Napi::Number::New(env, i), Napi::Number::New(env, a[i]));
+  }
 
-  info.GetReturnValue().Set(dash);
+  return dash;
 }
 
 /*
  * Set line dash offset
  * ref: http://www.w3.org/TR/2dcontext/#dom-context-2d-setlinedash
  */
-NAN_SETTER(Context2d::SetLineDashOffset) {
-  double offset = value->NumberValue();
-  if (isnan(offset) || isinf(offset)) return;
+void
+Context2d::SetLineDashOffset(const Napi::CallbackInfo& info, const Napi::Value& value) {
+  Napi::Number numberValue;
+  if (!value.ToNumber().UnwrapTo(&numberValue)) return;
+  double offset = numberValue.DoubleValue();
+  if (!std::isfinite(offset)) return;
 
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  cairo_t *ctx = context->context();
+  cairo_t *ctx = this->context();
 
   int dashes = cairo_get_dash_count(ctx);
   std::vector<double> a(dashes);
@@ -1991,60 +2919,60 @@ NAN_SETTER(Context2d::SetLineDashOffset) {
  * Get line dash offset
  * ref: http://www.w3.org/TR/2dcontext/#dom-context-2d-setlinedash
  */
-NAN_GETTER(Context2d::GetLineDashOffset) {
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  cairo_t *ctx = context->context();
+Napi::Value
+Context2d::GetLineDashOffset(const Napi::CallbackInfo& info) {
+  cairo_t *ctx = this->context();
   double offset;
   cairo_get_dash(ctx, NULL, &offset);
 
-  info.GetReturnValue().Set(Nan::New<Number>(offset));
+  return Napi::Number::New(env, offset);
 }
 
 /*
  * Fill the rectangle defined by x, y, width and height.
  */
 
-NAN_METHOD(Context2d::FillRect) {
+void
+Context2d::FillRect(const Napi::CallbackInfo& info) {
   RECT_ARGS;
   if (0 == width || 0 == height) return;
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  cairo_t *ctx = context->context();
-  context->savePath();
+  cairo_t *ctx = context();
+  savePath();
   cairo_rectangle(ctx, x, y, width, height);
-  context->fill();
-  context->restorePath();
+  fill();
+  restorePath();
 }
 
 /*
  * Stroke the rectangle defined by x, y, width and height.
  */
 
-NAN_METHOD(Context2d::StrokeRect) {
+void
+Context2d::StrokeRect(const Napi::CallbackInfo& info) {
   RECT_ARGS;
   if (0 == width && 0 == height) return;
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  cairo_t *ctx = context->context();
-  context->savePath();
+  cairo_t *ctx = context();
+  savePath();
   cairo_rectangle(ctx, x, y, width, height);
-  context->stroke();
-  context->restorePath();
+  stroke();
+  restorePath();
 }
 
 /*
  * Clears all pixels defined by x, y, width and height.
  */
 
-NAN_METHOD(Context2d::ClearRect) {
+void
+Context2d::ClearRect(const Napi::CallbackInfo& info) {
   RECT_ARGS;
   if (0 == width || 0 == height) return;
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  cairo_t *ctx = context->context();
+  cairo_t *ctx = context();
   cairo_save(ctx);
-  context->savePath();
+  savePath();
   cairo_rectangle(ctx, x, y, width, height);
   cairo_set_operator(ctx, CAIRO_OPERATOR_CLEAR);
   cairo_fill(ctx);
-  context->restorePath();
+  restorePath();
   cairo_restore(ctx);
 }
 
@@ -2052,10 +2980,10 @@ NAN_METHOD(Context2d::ClearRect) {
  * Adds a rectangle subpath.
  */
 
-NAN_METHOD(Context2d::Rect) {
+void
+Context2d::Rect(const Napi::CallbackInfo& info) {
   RECT_ARGS;
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  cairo_t *ctx = context->context();
+  cairo_t *ctx = context();
   if (width == 0) {
     cairo_move_to(ctx, x, y);
     cairo_line_to(ctx, x, y + height);
@@ -2067,36 +2995,264 @@ NAN_METHOD(Context2d::Rect) {
   }
 }
 
+// Draws an arc with two potentially different radii.
+inline static
+void elli_arc(cairo_t* ctx, double xc, double yc, double rx, double ry, double a1, double a2, bool clockwise=true) {
+  if (rx == 0. || ry == 0.) {
+    cairo_line_to(ctx, xc + rx, yc + ry);
+  } else {
+    cairo_save(ctx);
+    cairo_translate(ctx, xc, yc);
+    cairo_scale(ctx, rx, ry);
+    if (clockwise)
+      cairo_arc(ctx, 0., 0., 1., a1, a2);
+    else
+      cairo_arc_negative(ctx, 0., 0., 1., a2, a1);
+    cairo_restore(ctx);
+  }
+}
+
+inline static
+bool getRadius(Point<double>& p, const Napi::Value& v) {
+  Napi::Env env = v.Env();
+  if (v.IsObject()) { // 5.1 DOMPointInit
+    Napi::Value rx;
+    Napi::Value ry;
+    auto rxMaybe = v.As<Napi::Object>().Get("x");
+    auto ryMaybe = v.As<Napi::Object>().Get("y");
+    if (rxMaybe.UnwrapTo(&rx) && rx.IsNumber() && ryMaybe.UnwrapTo(&ry) && ry.IsNumber()) {
+      auto rxv = rx.As<Napi::Number>().DoubleValue();
+      auto ryv = ry.As<Napi::Number>().DoubleValue();
+      if (!std::isfinite(rxv) || !std::isfinite(ryv))
+        return true;
+      if (rxv < 0 || ryv < 0) {
+        Napi::RangeError::New(env, "radii must be positive.").ThrowAsJavaScriptException();
+
+        return true;
+      }
+      p.x = rxv;
+      p.y = ryv;
+      return false;
+    }
+  } else if (v.IsNumber()) { // 5.2 unrestricted double
+    auto rv = v.As<Napi::Number>().DoubleValue();
+    if (!std::isfinite(rv))
+      return true;
+    if (rv < 0) {
+      Napi::RangeError::New(env, "radii must be positive.").ThrowAsJavaScriptException();
+
+      return true;
+    }
+    p.x = p.y = rv;
+    return false;
+  }
+  return true;
+}
+
+/**
+ * https://html.spec.whatwg.org/multipage/canvas.html#dom-context-2d-roundrect
+ * x, y, w, h, [radius|[radii]]
+ */
+void
+Context2d::RoundRect(const Napi::CallbackInfo& info) {
+  RECT_ARGS;
+  cairo_t *ctx = this->context();
+
+  // 4. Let normalizedRadii be an empty list
+  Point<double> normalizedRadii[4];
+  size_t nRadii = 4;
+
+  if (info[4].IsUndefined()) {
+    for (size_t i = 0; i < 4; i++)
+      normalizedRadii[i].x = normalizedRadii[i].y = 0.;
+
+  } else if (info[4].IsArray()) {
+    auto radiiList = info[4].As<Napi::Array>();
+    nRadii = radiiList.Length();
+    if (!(nRadii >= 1 && nRadii <= 4)) {
+      Napi::RangeError::New(env, "radii must be a list of one, two, three or four radii.").ThrowAsJavaScriptException();
+      return;
+    }
+    // 5. For each radius of radii
+    for (size_t i = 0; i < nRadii; i++) {
+      Napi::Value r;
+      if (!radiiList.Get(i).UnwrapTo(&r) || getRadius(normalizedRadii[i], r))
+        return;
+    }
+
+  } else {
+    // 2. If radii is a double, then set radii to <<radii>>
+    if (getRadius(normalizedRadii[0], info[4]))
+      return;
+    for (size_t i = 1; i < 4; i++) {
+      normalizedRadii[i].x = normalizedRadii[0].x;
+      normalizedRadii[i].y = normalizedRadii[0].y;
+    }
+  }
+
+  Point<double> upperLeft, upperRight, lowerRight, lowerLeft;
+  if (nRadii == 4) {
+    upperLeft = normalizedRadii[0];
+    upperRight = normalizedRadii[1];
+    lowerRight = normalizedRadii[2];
+    lowerLeft = normalizedRadii[3];
+  } else if (nRadii == 3) {
+    upperLeft = normalizedRadii[0];
+    upperRight = normalizedRadii[1];
+    lowerLeft = normalizedRadii[1];
+    lowerRight = normalizedRadii[2];
+  } else if (nRadii == 2) {
+    upperLeft = normalizedRadii[0];
+    lowerRight = normalizedRadii[0];
+    upperRight = normalizedRadii[1];
+    lowerLeft = normalizedRadii[1];
+  } else {
+    upperLeft = normalizedRadii[0];
+    upperRight = normalizedRadii[0];
+    lowerRight = normalizedRadii[0];
+    lowerLeft = normalizedRadii[0];
+  }
+
+  bool clockwise = true;
+  if (width < 0) {
+    clockwise = false;
+    x += width;
+    width = -width;
+    std::swap(upperLeft, upperRight);
+    std::swap(lowerLeft, lowerRight);
+  }
+
+  if (height < 0) {
+    clockwise = !clockwise;
+    y += height;
+    height = -height;
+    std::swap(upperLeft, lowerLeft);
+    std::swap(upperRight, lowerRight);
+  }
+
+  // 11. Corner curves must not overlap. Scale radii to prevent this.
+  {
+    auto top = upperLeft.x + upperRight.x;
+    auto right = upperRight.y + lowerRight.y;
+    auto bottom = lowerRight.x + lowerLeft.x;
+    auto left = upperLeft.y + lowerLeft.y;
+    auto scale = std::min({ width / top, height / right, width / bottom, height / left });
+    if (scale < 1.) {
+      upperLeft.x *= scale;
+      upperLeft.y *= scale;
+      upperRight.x *= scale;
+      upperRight.x *= scale;
+      lowerLeft.y *= scale;
+      lowerLeft.y *= scale;
+      lowerRight.y *= scale;
+      lowerRight.y *= scale;
+    }
+  }
+
+  // 12. Draw
+  cairo_move_to(ctx, x + upperLeft.x, y);
+  if (clockwise) {
+    cairo_line_to(ctx, x + width - upperRight.x, y);
+    elli_arc(ctx, x + width - upperRight.x, y + upperRight.y, upperRight.x, upperRight.y, 3. * M_PI / 2., 0.);
+    cairo_line_to(ctx, x + width, y + height - lowerRight.y);
+    elli_arc(ctx, x + width - lowerRight.x, y + height - lowerRight.y, lowerRight.x, lowerRight.y, 0, M_PI / 2.);
+    cairo_line_to(ctx, x + lowerLeft.x, y + height);
+    elli_arc(ctx, x + lowerLeft.x, y + height - lowerLeft.y, lowerLeft.x, lowerLeft.y, M_PI / 2., M_PI);
+    cairo_line_to(ctx, x, y + upperLeft.y);
+    elli_arc(ctx, x + upperLeft.x, y + upperLeft.y, upperLeft.x, upperLeft.y, M_PI, 3. * M_PI / 2.);
+  } else {
+    elli_arc(ctx, x + upperLeft.x, y + upperLeft.y, upperLeft.x, upperLeft.y, M_PI, 3. * M_PI / 2., false);
+    cairo_line_to(ctx, x, y + upperLeft.y);
+    elli_arc(ctx, x + lowerLeft.x, y + height - lowerLeft.y, lowerLeft.x, lowerLeft.y, M_PI / 2., M_PI, false);
+    cairo_line_to(ctx, x + lowerLeft.x, y + height);
+    elli_arc(ctx, x + width - lowerRight.x, y + height - lowerRight.y, lowerRight.x, lowerRight.y, 0, M_PI / 2., false);
+    cairo_line_to(ctx, x + width, y + height - lowerRight.y);
+    elli_arc(ctx, x + width - upperRight.x, y + upperRight.y, upperRight.x, upperRight.y, 3. * M_PI / 2., 0., false);
+    cairo_line_to(ctx, x + width - upperRight.x, y);
+  }
+  cairo_close_path(ctx);
+}
+
+// Adapted from https://chromium.googlesource.com/chromium/blink/+/refs/heads/main/Source/modules/canvas2d/CanvasPathMethods.cpp
+static void canonicalizeAngle(double& startAngle, double& endAngle) {
+  // Make 0 <= startAngle < 2*PI
+  double newStartAngle = std::fmod(startAngle, twoPi);
+  if (newStartAngle < 0) {
+      newStartAngle += twoPi;
+      // Check for possible catastrophic cancellation in cases where
+      // newStartAngle was a tiny negative number (c.f. crbug.com/503422)
+      if (newStartAngle >= twoPi)
+          newStartAngle -= twoPi;
+  }
+  double delta = newStartAngle - startAngle;
+  startAngle = newStartAngle;
+  endAngle = endAngle + delta;
+}
+
+// Adapted from https://chromium.googlesource.com/chromium/blink/+/refs/heads/main/Source/modules/canvas2d/CanvasPathMethods.cpp
+static double adjustEndAngle(double startAngle, double endAngle, bool counterclockwise) {
+  double newEndAngle = endAngle;
+  /* http://www.whatwg.org/specs/web-apps/current-work/multipage/the-canvas-element.html#dom-context-2d-arc
+  * If the counterclockwise argument is false and endAngle-startAngle is equal to or greater than 2pi, or,
+  * if the counterclockwise argument is true and startAngle-endAngle is equal to or greater than 2pi,
+  * then the arc is the whole circumference of this ellipse, and the point at startAngle along this circle's circumference,
+  * measured in radians clockwise from the ellipse's semi-major axis, acts as both the start point and the end point.
+  */
+  if (!counterclockwise && endAngle - startAngle >= twoPi)
+    newEndAngle = startAngle + twoPi;
+  else if (counterclockwise && startAngle - endAngle >= twoPi)
+    newEndAngle = startAngle - twoPi;
+  /*
+  * Otherwise, the arc is the path along the circumference of this ellipse from the start point to the end point,
+  * going anti-clockwise if the counterclockwise argument is true, and clockwise otherwise.
+  * Since the points are on the ellipse, as opposed to being simply angles from zero,
+  * the arc can never cover an angle greater than 2pi radians.
+  */
+  /* NOTE: When startAngle = 0, endAngle = 2Pi and counterclockwise = true, the spec does not indicate clearly.
+  * We draw the entire circle, because some web sites use arc(x, y, r, 0, 2*Math.PI, true) to draw circle.
+  * We preserve backward-compatibility.
+  */
+  else if (!counterclockwise && startAngle > endAngle)
+    newEndAngle = startAngle + (twoPi - std::fmod(startAngle - endAngle, twoPi));
+  else if (counterclockwise && startAngle < endAngle)
+    newEndAngle = startAngle - (twoPi - std::fmod(endAngle - startAngle, twoPi));
+  return newEndAngle;
+}
+
 /*
- * Adds an arc at x, y with the given radis and start/end angles.
+ * Adds an arc at x, y with the given radii and start/end angles.
  */
 
-NAN_METHOD(Context2d::Arc) {
-  if (!info[0]->IsNumber()
-    || !info[1]->IsNumber()
-    || !info[2]->IsNumber()
-    || !info[3]->IsNumber()
-    || !info[4]->IsNumber()) return;
+void
+Context2d::Arc(const Napi::CallbackInfo& info) {
+  double args[5];
+  if(!checkArgs(info, args, 5))
+    return;
 
-  bool anticlockwise = info[5]->BooleanValue();
+  auto x = args[0];
+  auto y = args[1];
+  auto radius = args[2];
+  auto startAngle = args[3];
+  auto endAngle = args[4];
 
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  cairo_t *ctx = context->context();
+  if (radius < 0) {
+    Napi::RangeError::New(env, "The radius provided is negative.").ThrowAsJavaScriptException();
+    return;
+  }
 
-  if (anticlockwise && M_PI * 2 != info[4]->NumberValue()) {
-    cairo_arc_negative(ctx
-      , info[0]->NumberValue()
-      , info[1]->NumberValue()
-      , info[2]->NumberValue()
-      , info[3]->NumberValue()
-      , info[4]->NumberValue());
+  Napi::Boolean counterclockwiseValue;
+  if (!info[5].ToBoolean().UnwrapTo(&counterclockwiseValue)) return;
+  bool counterclockwise = counterclockwiseValue.Value();
+
+  cairo_t *ctx = context();
+
+  canonicalizeAngle(startAngle, endAngle);
+  endAngle = adjustEndAngle(startAngle, endAngle, counterclockwise);
+
+  if (counterclockwise) {
+    cairo_arc_negative(ctx, x, y, radius, startAngle, endAngle);
   } else {
-    cairo_arc(ctx
-      , info[0]->NumberValue()
-      , info[1]->NumberValue()
-      , info[2]->NumberValue()
-      , info[3]->NumberValue()
-      , info[4]->NumberValue());
+    cairo_arc(ctx, x, y, radius, startAngle, endAngle);
   }
 }
 
@@ -2106,15 +3262,13 @@ NAN_METHOD(Context2d::Arc) {
  * Implementation influenced by WebKit.
  */
 
-NAN_METHOD(Context2d::ArcTo) {
-  if (!info[0]->IsNumber()
-    || !info[1]->IsNumber()
-    || !info[2]->IsNumber()
-    || !info[3]->IsNumber()
-    || !info[4]->IsNumber()) return;
+void
+Context2d::ArcTo(const Napi::CallbackInfo& info) {
+  double args[5];
+  if(!checkArgs(info, args, 5))
+    return;
 
-  Context2d *context = Nan::ObjectWrap::Unwrap<Context2d>(info.This());
-  cairo_t *ctx = context->context();
+  cairo_t *ctx = context();
 
   // Current path point
   double x, y;
@@ -2122,12 +3276,12 @@ NAN_METHOD(Context2d::ArcTo) {
   Point<float> p0(x, y);
 
   // Point (x0,y0)
-  Point<float> p1(info[0]->NumberValue(), info[1]->NumberValue());
+  Point<float> p1(args[0], args[1]);
 
   // Point (x1,y1)
-  Point<float> p2(info[2]->NumberValue(), info[3]->NumberValue());
+  Point<float> p2(args[2], args[3]);
 
-  float radius = info[4]->NumberValue();
+  float radius = args[4];
 
   if ((p1.x == p0.x && p1.y == p0.y)
     || (p1.x == p2.x && p1.y == p2.y)
@@ -2206,3 +3360,109 @@ NAN_METHOD(Context2d::ArcTo) {
       , ea);
   }
 }
+
+/*
+ * Adds an ellipse to the path which is centered at (x, y) position with the
+ * radii radiusX and radiusY starting at startAngle and ending at endAngle
+ * going in the given direction by anticlockwise (defaulting to clockwise).
+ */
+
+void
+Context2d::Ellipse(const Napi::CallbackInfo& info) {
+  double args[7];
+  if(!checkArgs(info, args, 7))
+    return;
+
+  double radiusX = args[2];
+  double radiusY = args[3];
+
+  if (radiusX == 0 || radiusY == 0) return;
+
+  double x = args[0];
+  double y = args[1];
+  double rotation = args[4];
+  double startAngle = args[5];
+  double endAngle = args[6];
+  Napi::Boolean anticlockwiseValue;
+
+  if (!info[7].ToBoolean().UnwrapTo(&anticlockwiseValue)) return;
+  bool anticlockwise = anticlockwiseValue.Value();
+
+  cairo_t *ctx = context();
+
+  // See https://www.cairographics.org/cookbook/ellipses/
+  double xRatio = radiusX / radiusY;
+
+  cairo_matrix_t save_matrix;
+  cairo_get_matrix(ctx, &save_matrix);
+  cairo_translate(ctx, x, y);
+  cairo_rotate(ctx, rotation);
+  cairo_scale(ctx, xRatio, 1.0);
+  cairo_translate(ctx, -x, -y);
+  if (anticlockwise && M_PI * 2 != args[4]) {
+    cairo_arc_negative(ctx,
+      x,
+      y,
+      radiusY,
+      startAngle,
+      endAngle);
+  } else {
+    cairo_arc(ctx,
+      x,
+      y,
+      radiusY,
+      startAngle,
+      endAngle);
+  }
+  cairo_set_matrix(ctx, &save_matrix);
+}
+
+#if CAIRO_VERSION >= CAIRO_VERSION_ENCODE(1, 16, 0)
+
+void
+Context2d::BeginTag(const Napi::CallbackInfo& info) {
+  std::string tagName = "";
+  std::string attributes = "";
+
+  if (info.Length() == 0) {
+    Napi::TypeError::New(env, "Tag name is required").ThrowAsJavaScriptException();
+    return;
+  } else {
+    if (!info[0].IsString()) {
+      Napi::TypeError::New(env, "Tag name must be a string.").ThrowAsJavaScriptException();
+      return;
+    } else {
+      tagName = info[0].As<Napi::String>().Utf8Value();
+    }
+
+    if (info.Length() > 1) {
+      if (!info[1].IsString()) {
+        Napi::TypeError::New(env, "Attributes must be a string matching Cairo's attribute format").ThrowAsJavaScriptException();
+        return;
+      } else {
+        attributes = info[1].As<Napi::String>().Utf8Value();
+      }
+    }
+  }
+
+  cairo_tag_begin(_context, tagName.c_str(), attributes.c_str());
+}
+
+void
+Context2d::EndTag(const Napi::CallbackInfo& info) {
+  if (info.Length() == 0) {
+    Napi::TypeError::New(env, "Tag name is required").ThrowAsJavaScriptException();
+    return;
+  }
+
+  if (!info[0].IsString()) {
+    Napi::TypeError::New(env, "Tag name must be a string.").ThrowAsJavaScriptException();
+    return;
+  }
+
+  std::string tagName = info[0].As<Napi::String>().Utf8Value();
+
+  cairo_tag_end(_context, tagName.c_str());
+}
+
+#endif

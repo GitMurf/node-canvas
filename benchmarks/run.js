@@ -4,16 +4,16 @@
  * milliseconds to complete.
  */
 
-var Canvas = require('../')
-var canvas = new Canvas(200, 200)
-var largeCanvas = new Canvas(1000, 1000)
-var ctx = canvas.getContext('2d')
+const { createCanvas } = require('../')
+const canvas = createCanvas(200, 200)
+const largeCanvas = createCanvas(1000, 1000)
+const ctx = canvas.getContext('2d')
 
-var initialTimes = 10
-var minDurationMs = 2000
+const initialTimes = 10
+const minDurationMs = 2000
 
-var queue = []
-var running = false
+const queue = []
+let running = false
 
 function bm (label, fn) {
   queue.push({ label: label, fn: fn })
@@ -28,11 +28,11 @@ function next () {
 
 function run (benchmark, n, start) {
   running = true
-  var originalN = n
-  var fn = benchmark.fn
+  const originalN = n
+  const fn = benchmark.fn
 
   if (fn.length) { // async
-    var pending = n
+    let pending = n
 
     while (n--) {
       fn(function () {
@@ -46,12 +46,12 @@ function run (benchmark, n, start) {
 }
 
 function done (benchmark, times, start, isAsync) {
-  var duration = Date.now() - start
+  const duration = Date.now() - start
 
   if (duration < minDurationMs) {
     run(benchmark, times * 2, Date.now())
   } else {
-    var opsSec = times / duration * 1000
+    const opsSec = times / duration * 1000
     if (isAsync) {
       console.log('  - \x1b[33m%s\x1b[0m %s ops/sec (%s times, async)', benchmark.label, opsSec.toLocaleString(), times)
     } else {
@@ -63,6 +63,40 @@ function done (benchmark, times, start, isAsync) {
 }
 
 // node-canvas
+
+function fontName () {
+  return String.fromCharCode(0x61 + Math.floor(Math.random() * 26)) +
+    String.fromCharCode(0x61 + Math.floor(Math.random() * 26)) +
+    String.fromCharCode(0x61 + Math.floor(Math.random() * 26)) +
+    String.fromCharCode(0x61 + Math.floor(Math.random() * 26))
+}
+
+bm('font setter', function () {
+  ctx.font = `12px ${fontName()}`
+  ctx.font = `400 6px ${fontName()}`
+  ctx.font = `1px ${fontName()}`
+  ctx.font = `normal normal bold 12cm ${fontName()}`
+  ctx.font = `italic 9mm ${fontName}, "Times New Roman", "Apple Color Emoji", "Comic Sans"`
+  ctx.font = `small-caps oblique 44px/44px ${fontName()}, "The Quick Brown", "Fox Jumped", "Over", "The", "Lazy Dog"`
+})
+
+bm('save/restore', function () {
+  for (let i = 0; i < 1000; i++) {
+    const max = i & 15
+    for (let j = 0; j < max; ++j) {
+      ctx.save()
+    }
+    for (let j = 0; j < max; ++j) {
+      ctx.restore()
+    }
+  }
+})
+
+bm('fillStyle= name', function () {
+  for (let i = 0; i < 10000; i++) {
+    ctx.fillStyle = '#fefefe'
+  }
+})
 
 bm('lineTo()', function () {
   ctx.lineTo(0, 50)
@@ -91,7 +125,7 @@ bm('strokeRect()', function () {
 })
 
 bm('linear gradients', function () {
-  var lingrad = ctx.createLinearGradient(0, 50, 0, 95)
+  const lingrad = ctx.createLinearGradient(0, 50, 0, 95)
   lingrad.addColorStop(0.5, '#000')
   lingrad.addColorStop(1, 'rgba(0,0,0,0)')
   ctx.fillStyle = lingrad
@@ -134,11 +168,11 @@ bm('moveTo() / arc() / stroke()', function () {
   ctx.beginPath()
   ctx.arc(75, 75, 50, 0, Math.PI * 2, true) // Outer circle
   ctx.moveTo(110, 75)
-  ctx.arc(75, 75, 35, 0, Math.PI, false)   // Mouth
+  ctx.arc(75, 75, 35, 0, Math.PI, false) // Mouth
   ctx.moveTo(65, 65)
-  ctx.arc(60, 65, 5, 0, Math.PI * 2, true)  // Left eye
+  ctx.arc(60, 65, 5, 0, Math.PI * 2, true) // Left eye
   ctx.moveTo(95, 65)
-  ctx.arc(90, 65, 5, 0, Math.PI * 2, true)  // Right eye
+  ctx.arc(90, 65, 5, 0, Math.PI * 2, true) // Right eye
   ctx.stroke()
 })
 
@@ -151,7 +185,7 @@ bm('getImageData(0,0,100,100)', function () {
 })
 
 bm('PNGStream 200x200', function (done) {
-  var stream = canvas.createSyncPNGStream()
+  const stream = canvas.createPNGStream()
   stream.on('data', function (chunk) {
     // whatever
   })

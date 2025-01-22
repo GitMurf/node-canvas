@@ -4,13 +4,18 @@ build
 test/images/*.png
 examples/*.png
 examples/*.jpg
+examples/*.pdf
 testing
 out.png
 out.pdf
 out.svg
 .pomo
 node_modules
+package-lock.json
 
 # Vim cruft
 *.swp
 *.un~
+npm-debug.log
+
+.idea
